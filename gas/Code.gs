@@ -909,5 +909,10 @@ function setup() {
     var cal = CalendarApp.createCalendar('FLHシフト（全体）', { timeZone: TZ });
     PropertiesService.getScriptProperties().setProperty('SHARED_CALENDAR_ID', cal.getId());
   }
-  Logger.log('セットアップ完了。共有カレンダー「FLHシフト（全体）」も作成済みです。');
+  // 実行者を管理者として自動登録（Staffが空の場合のみ）
+  if (readAll('Staff').length === 0) {
+    var me = Session.getEffectiveUser().getEmail();
+    appendRows('Staff', [{ email: me.toLowerCase(), name: '管理者', isAdmin: 'true', locationIds: '', active: 'true' }]);
+  }
+  Logger.log('セットアップ完了。共有カレンダー「FLHシフト（全体）」の作成と管理者登録も完了しました。');
 }
