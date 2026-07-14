@@ -695,12 +695,24 @@ function mailAdmins(subject, body) {
 // ==================== スプレッドシート ユーティリティ ====================
 
 function ss() {
-  return SpreadsheetApp.openById(props('SPREADSHEET_ID'));
+  // コンテナバインド型ならアクティブなスプレッドシートを使用（SPREADSHEET_ID設定不要）
+  var id = props('SPREADSHEET_ID');
+  if (id) return SpreadsheetApp.openById(id);
+  var active = SpreadsheetApp.getActiveSpreadsheet();
+  if (!active) throw new Error('server_error');
+  return active;
 }
 
 function sheet(name) {
   var sh = ss().getSheetByName(name);
-  if (!sh) throw new Error('server_error');
+  if (!sh) {
+    // 初回アクセス時に自動作成
+    sh = ss().insertSheet(name);
+    var headers = SHEETS[name];
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sh.setFrozenRows(1);
+    sh.getRange(1, 1, sh.getMaxRows(), headers.length).setNumberFormat('@');
+  }
   return sh;
 }
 
@@ -862,7 +874,10 @@ function jsonOut(obj) {
 
 // ==================== 初回セットアップ ====================
 
-/** 一度だけ手動実行: シートとヘッダーを自動作成 */
+/**
+ * 一度だけ手動実行: シート作成・権限承認・リマインダートリガー登録・共有カレンダー作成
+ * をまとめて行う。実行後に表示される権限確認はすべて「許可」してください。
+ */
 function setup() {
   var spreadsheet = ss();
   Object.keys(SHEETS).forEach(function (name) {
@@ -874,6 +889,11 @@ function setup() {
     // 全セルを書式なしテキストに（"09:00"や日付が勝手に型変換されるのを防ぐ）
     sh.getRange(1, 1, sh.getMaxRows(), headers.length).setNumberFormat('@');
   });
+  // 最初に自動作成される「シート1」は削除
+  var default1 = spreadsheet.getSheetByName('シート1') || spreadsheet.getSheetByName('Sheet1');
+  if (default1 && spreadsheet.getSheets().length > Object.keys(SHEETS).length) {
+    spreadsheet.deleteSheet(default1);
+  }
   // 締切のデフォルト設定
   var settings = readAll('Settings');
   if (settings.length === 0) {
@@ -882,5 +902,12 @@ function setup() {
       { key: 'deadlineDayB', value: DEFAULT_SETTINGS.deadlineDayB }
     ]);
   }
-  Logger.log('セットアップ完了。Staffシートに管理者のメールアドレスを登録してください。');
+  // リマインダートリガー登録
+  setupTriggers();
+  // 共有カレンダー作成（未作成の場合のみ）
+  if (!props('SHARED_CALENDAR_ID')) {
+    var cal = CalendarApp.createCalendar('FLHシフト（全体）', { timeZone: TZ });
+    PropertiesService.getScriptProperties().setProperty('SHARED_CALENDAR_ID', cal.getId());
+  }
+  Logger.log('セットアップ完了。共有カレンダー「FLHシフト（全体）」も作成済みです。');
 }
