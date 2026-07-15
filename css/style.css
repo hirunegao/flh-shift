@@ -123,6 +123,8 @@ body {
   border-radius: 8px; padding: 7px 12px; font-size: 12px; cursor: pointer;
 }
 .btn-mini.danger { color: var(--red); border-color: #fecaca; }
+.btn-mini.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 700; }
+.btn-sm { padding: 8px 14px; font-size: 13px; }
 
 /* ---------- チップ・ステータス ---------- */
 .chip {
@@ -163,7 +165,7 @@ body {
 }
 
 /* ---------- 入力画面 ---------- */
-.editor-page { padding-bottom: 230px; }
+.editor-page { padding-bottom: 300px; }
 .deadline-line { font-size: 12px; color: var(--gray-600); margin-bottom: 10px; text-align: center; }
 
 .day-list { background: #fff; border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
@@ -173,7 +175,15 @@ body {
 }
 .day-row:last-child { border-bottom: none; }
 .day-row:active { background: var(--accent-light); }
+.day-check {
+  display: flex; align-items: center; justify-content: center;
+  width: 40px; align-self: stretch; flex-shrink: 0; cursor: pointer;
+}
+.day-check input {
+  width: 20px; height: 20px; accent-color: var(--accent); cursor: pointer;
+}
 .day-label { width: 92px; padding: 8px 0 8px 14px; font-size: 13px; font-weight: 700; flex-shrink: 0; }
+.day-check + .day-label { padding-left: 0; }
 .day-row.sun .day-label { color: var(--red); }
 .day-row.sat .day-label { color: var(--accent); }
 .day-content { flex: 1; padding: 8px 4px; display: flex; flex-wrap: wrap; gap: 4px; }
@@ -360,6 +370,16 @@ body {
 .master-card { border: 1px solid var(--gray-100); border-radius: 10px; padding: 10px; margin-bottom: 10px; }
 .master-card.inactive { opacity: .5; }
 .loc-check { font-size: 12px; display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; }
+
+/* テンプレート */
+.template-row {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--gray-200); border-radius: 12px;
+  padding: 10px 12px; margin-bottom: 8px;
+}
+.template-info { flex: 1; min-width: 0; font-size: 14px; }
+.template-info small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.template-buttons { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 
 /* デスクトップ調整 */
 @media (min-width: 700px) {

@@ -24,6 +24,7 @@ var SHEETS = {
   Shifts: ['id', 'staffEmail', 'periodKey', 'date', 'patternId', 'startTime', 'endTime', 'locationId', 'eventId', 'sharedEventId', 'updatedAt'],
   Submissions: ['id', 'staffEmail', 'periodKey', 'status', 'comment', 'late', 'submittedAt', 'approvedAt', 'approvedBy', 'rejectReason', 'updatedAt'],
   ChangeRequests: ['id', 'staffEmail', 'periodKey', 'reason', 'status', 'createdAt', 'resolvedAt', 'resolvedBy'],
+  Templates: ['id', 'staffEmail', 'name', 'dataJson', 'updatedAt'],
   Settings: ['key', 'value'],
   AuditLog: ['timestamp', 'actor', 'action', 'detail']
 };
@@ -125,6 +126,17 @@ function route(req) {
       return apiGetApprovedShifts(staff, payload);
     case 'createChangeRequest':
       return apiCreateChangeRequest(staff, payload);
+    case 'getTemplates':
+      return readAll('Templates')
+        .filter(function (t) { return t.staffEmail === staff.email; })
+        .map(function (t) { return { id: t.id, name: t.name, data: t.dataJson }; });
+    case 'saveTemplate':
+      return apiSaveTemplate(staff, payload);
+    case 'deleteTemplate':
+      deleteRowsWhere('Templates', function (t) {
+        return t.id === payload.id && t.staffEmail === staff.email;
+      });
+      return { deleted: true };
   }
 
   // ここから管理者専用
@@ -303,6 +315,19 @@ function apiCreateChangeRequest(staff, payload) {
     staff.name + ' さんから変更リクエストが届きました。\n期間: ' + periodLabel(pk) + '\n理由: ' + payload.reason + '\n管理画面: ' + appUrl() + '#/admin');
   log(staff.email, 'change_request', pk);
   return { requested: true };
+}
+
+/** テンプレート保存 payload: { name, data(曜日→枠リストのオブジェクト) } */
+function apiSaveTemplate(staff, payload) {
+  if (!payload.name || !payload.data) throw new Error('invalid_request');
+  var row = {
+    id: uid(), staffEmail: staff.email,
+    name: String(payload.name).slice(0, 40),
+    dataJson: JSON.stringify(payload.data),
+    updatedAt: nowStr()
+  };
+  appendRows('Templates', [row]);
+  return { id: row.id };
 }
 
 // ---------- 管理者API ----------

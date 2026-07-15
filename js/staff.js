@@ -87,6 +87,8 @@ var Staff = (function () {
       entries: entries,
       comment: data.submission ? data.submission.comment : '',
       selectedChip: null,
+      selectedDays: {},
+      templates: null,
       locked: data.locked,
       submission: data.submission,
       saving: false,
@@ -109,6 +111,8 @@ var Staff = (function () {
       entries: entries,
       comment: submission ? submission.comment : '',
       selectedChip: null,
+      selectedDays: {},
+      templates: null,
       locked: false,
       submission: submission,
       saving: false,
@@ -199,17 +203,21 @@ var Staff = (function () {
         }).join('');
       }
       return '<div class="day-row ' + App.weekdayClass(date) + '" data-date="' + date + '">' +
+        (editor.locked ? '' :
+          '<label class="day-check"><input type="checkbox"' + (editor.selectedDays[date] ? ' checked' : '') +
+          ' onchange="Staff.toggleDay(\'' + date + '\', this.checked)"></label>') +
         '<div class="day-label" onclick="Staff.tapDay(\'' + date + '\')">' + App.dateLabel(date) + '</div>' +
         '<div class="day-content" onclick="Staff.tapDay(\'' + date + '\')">' + content + '</div>' +
         (editor.locked ? '' : '<button class="day-detail" onclick="Staff.openDaySheet(\'' + date + '\')">︙</button>') +
         '</div>';
     }).join('');
 
-    // パターンチップ（スタンプ）
+    // パターンチップ（スタンプ）＋一括操作
     var chipBar = '';
     if (!editor.locked) {
+      var selCount = Object.keys(editor.selectedDays).length;
       chipBar = '<div class="chip-bar">' +
-        '<div class="chip-bar-hint">① パターンを選ぶ → ② 日付をタップで入力</div>' +
+        '<div class="chip-bar-hint">パターンを選んで日付をタップ／チェックを付けて一括適用</div>' +
         '<div class="chip-bar-scroll">' +
         patterns.map(function (p) {
           return '<button class="pattern-chip' + (editor.selectedChip === p.id ? ' selected' : '') + '" ' +
@@ -218,11 +226,20 @@ var Staff = (function () {
         '<button class="pattern-chip chip-off' + (editor.selectedChip === 'off' ? ' selected' : '') + '" onclick="Staff.selectChip(\'off\')">休み<small>クリア</small></button>' +
         '</div>' +
         '<div class="quick-actions">' +
-        '  <button class="btn-mini" onclick="Staff.applyAll(false)">平日すべてに適用</button>' +
-        '  <button class="btn-mini" onclick="Staff.applyAll(true)">全日に適用</button>' +
+        '  <button class="btn-mini" onclick="Staff.selectDays(\'all\')">☑ 全選択</button>' +
+        '  <button class="btn-mini" onclick="Staff.selectDays(\'weekday\')">☑ 平日</button>' +
+        '  <button class="btn-mini" onclick="Staff.selectDays(\'weekend\')">☑ 土日</button>' +
+        '  <button class="btn-mini" onclick="Staff.selectDays(\'none\')">解除</button>' +
+        '  <button class="btn-mini" onclick="Staff.openTemplateSheet()">📋 テンプレート</button>' +
         '  <button class="btn-mini" onclick="Staff.copyPrevious()">前回コピー</button>' +
         '  <button class="btn-mini danger" onclick="Staff.clearAll()">全クリア</button>' +
         '</div>' +
+        (selCount > 0
+          ? '<div class="quick-actions">' +
+            '  <button class="btn-mini primary" onclick="Staff.applySelected()">✓ 選択した' + selCount + '日に適用</button>' +
+            '  <button class="btn-mini" onclick="Staff.offSelected()">選択日を休みに</button>' +
+            '</div>'
+          : '') +
         '</div>';
     }
 
@@ -289,20 +306,191 @@ var Staff = (function () {
     drawEditor();
   }
 
-  function applyAll(includeWeekend) {
-    if (!editor.selectedChip) { App.toast('先にパターンを選んでください', 'error'); return; }
+  // ---------- チェックボックス選択・一括適用 ----------
+
+  function toggleDay(date, checked) {
+    if (checked) editor.selectedDays[date] = true;
+    else delete editor.selectedDays[date];
     preserveComment();
-    App.periodDates(editor.pk).forEach(function (date) {
-      var day = new Date(date + 'T00:00:00').getDay();
-      if (!includeWeekend && (day === 0 || day === 6)) return;
-      if (editor.selectedChip === 'off') {
+    drawEditor();
+  }
+
+  function selectDays(mode) {
+    preserveComment();
+    editor.selectedDays = {};
+    if (mode !== 'none') {
+      App.periodDates(editor.pk).forEach(function (date) {
+        var day = new Date(date + 'T00:00:00').getDay();
+        var isWeekend = day === 0 || day === 6;
+        if (mode === 'all' || (mode === 'weekday' && !isWeekend) || (mode === 'weekend' && isWeekend)) {
+          editor.selectedDays[date] = true;
+        }
+      });
+    }
+    drawEditor();
+  }
+
+  function applySelected() {
+    if (!editor.selectedChip) {
+      App.toast('先に下のパターン（または「休み」）を選んでください', 'error');
+      return;
+    }
+    preserveComment();
+    var p = editor.selectedChip === 'off'
+      ? null
+      : App.state.masters.patterns.filter(function (x) { return x.id === editor.selectedChip; })[0];
+    Object.keys(editor.selectedDays).forEach(function (date) {
+      if (!p) {
         delete editor.entries[date];
       } else {
-        var p = App.state.masters.patterns.filter(function (x) { return x.id === editor.selectedChip; })[0];
         editor.entries[date] = [{ patternId: p.id, startTime: p.startTime, endTime: p.endTime, locationId: defaultLocationId(p) }];
       }
     });
+    var n = Object.keys(editor.selectedDays).length;
+    editor.selectedDays = {};
     drawEditor();
+    App.toast(n + '日分に適用しました', 'success');
+  }
+
+  function offSelected() {
+    preserveComment();
+    var n = Object.keys(editor.selectedDays).length;
+    Object.keys(editor.selectedDays).forEach(function (date) { delete editor.entries[date]; });
+    editor.selectedDays = {};
+    drawEditor();
+    App.toast(n + '日分を休みにしました', 'success');
+  }
+
+  // ---------- テンプレート ----------
+
+  var WEEKDAY_NAMES = ['日', '月', '火', '水', '木', '金', '土'];
+
+  async function loadTemplates() {
+    if (editor.templates === null) {
+      try {
+        var list = await Api.call('getTemplates');
+        editor.templates = list.map(function (t) {
+          var data = {};
+          try { data = JSON.parse(t.data); } catch (e) { /* 壊れたデータは空扱い */ }
+          return { id: t.id, name: t.name, data: data };
+        });
+      } catch (e) {
+        App.toast(e.message, 'error');
+        editor.templates = [];
+      }
+    }
+    return editor.templates;
+  }
+
+  async function openTemplateSheet() {
+    preserveComment();
+    var c = document.getElementById('modal-container');
+    c.innerHTML =
+      '<div class="sheet-overlay"><div class="sheet">' +
+      '<div class="sheet-handle"></div><h3>📋 テンプレート</h3>' +
+      '<p class="muted">読み込み中...</p></div></div>';
+    var templates = await loadTemplates();
+
+    var rows = templates.length === 0
+      ? '<p class="muted">まだテンプレートがありません。<br>シフトを入力してから「現在の入力から作成」を押すと、曜日ごとのパターンとして保存されます。</p>'
+      : templates.map(function (t) {
+        var summary = [1, 2, 3, 4, 5, 6, 0].map(function (w) {
+          var list = t.data[w] || [];
+          return WEEKDAY_NAMES[w] + ':' + (list.length === 0 ? '休' : list.map(function (en) {
+            return en.patternId ? patternName(en.patternId) || (en.startTime + '〜') : en.startTime + '〜' + en.endTime;
+          }).join('+'));
+        }).join(' ');
+        return '<div class="template-row">' +
+          '<div class="template-info"><b>' + esc(t.name) + '</b><br><small class="muted">' + esc(summary) + '</small></div>' +
+          '<div class="template-buttons">' +
+          '  <button class="btn btn-primary btn-sm" onclick="Staff.applyTemplate(\'' + t.id + '\')">適用</button>' +
+          '  <button class="btn-mini danger" onclick="Staff.deleteTemplate(\'' + t.id + '\')">削除</button>' +
+          '</div></div>';
+      }).join('');
+
+    c.innerHTML =
+      '<div class="sheet-overlay" onclick="if(event.target===this)App.closeSheet()">' +
+      '  <div class="sheet">' +
+      '    <div class="sheet-handle"></div>' +
+      '    <h3>📋 テンプレート</h3>' +
+      '    <p class="muted">曜日ごとの勤務パターンを保存して、期間全体に一括入力できます。</p>' +
+      rows +
+      '    <div class="sheet-actions">' +
+      '      <button class="btn btn-outline" onclick="App.closeSheet()">閉じる</button>' +
+      '      <button class="btn btn-primary" onclick="Staff.saveTemplateFromCurrent()">＋ 現在の入力から作成</button>' +
+      '    </div>' +
+      '  </div>' +
+      '</div>';
+  }
+
+  /** 現在の入力を「曜日→枠リスト」に変換して保存（各曜日の最初の日の内容を採用） */
+  async function saveTemplateFromCurrent() {
+    var hasInput = Object.keys(editor.entries).some(function (d) { return (editor.entries[d] || []).length > 0; });
+    if (!hasInput) {
+      App.toast('先にシフトを入力してください', 'error');
+      return;
+    }
+    App.closeSheet();
+    var name = await App.promptModal(
+      'テンプレート名',
+      '<p>各曜日の最初の日の内容を「曜日パターン」として保存します。<br>例: いつもの週、テスト期間用 など</p>',
+      '例: いつもの週', '保存'
+    );
+    if (!name) return;
+
+    var byWeekday = {};
+    App.periodDates(editor.pk).forEach(function (date) {
+      var w = new Date(date + 'T00:00:00').getDay();
+      if (byWeekday[w] === undefined) {
+        byWeekday[w] = (editor.entries[date] || []).map(function (en) {
+          return { patternId: en.patternId, startTime: en.startTime, endTime: en.endTime, locationId: en.locationId };
+        });
+      }
+    });
+
+    try {
+      await Api.call('saveTemplate', { name: name, data: byWeekday });
+      editor.templates = null; // 再読込させる
+      App.toast('テンプレート「' + name + '」を保存しました', 'success');
+      openTemplateSheet();
+    } catch (e) {
+      App.toast(e.message, 'error');
+    }
+  }
+
+  async function applyTemplate(id) {
+    var templates = await loadTemplates();
+    var t = templates.filter(function (x) { return x.id === id; })[0];
+    if (!t) return;
+    App.closeSheet();
+    document.getElementById('modal-container').innerHTML = '';
+    App.periodDates(editor.pk).forEach(function (date) {
+      var w = new Date(date + 'T00:00:00').getDay();
+      var list = t.data[w] || [];
+      if (list.length === 0) {
+        delete editor.entries[date];
+      } else {
+        editor.entries[date] = list.map(function (en) {
+          return { patternId: en.patternId, startTime: en.startTime, endTime: en.endTime, locationId: en.locationId };
+        });
+      }
+    });
+    editor.selectedDays = {};
+    drawEditor();
+    App.toast('テンプレート「' + t.name + '」を適用しました', 'success');
+  }
+
+  async function deleteTemplate(id) {
+    var yes = await App.confirmModal('テンプレート削除', 'このテンプレートを削除しますか？', '削除する');
+    if (!yes) { openTemplateSheet(); return; }
+    try {
+      await Api.call('deleteTemplate', { id: id });
+      editor.templates = null;
+      App.toast('削除しました', 'success');
+    } catch (e) {
+      App.toast(e.message, 'error');
+    }
+    openTemplateSheet();
   }
 
   async function copyPrevious() {
@@ -627,7 +815,14 @@ var Staff = (function () {
     periodNav: periodNav,
     selectChip: selectChip,
     tapDay: tapDay,
-    applyAll: applyAll,
+    toggleDay: toggleDay,
+    selectDays: selectDays,
+    applySelected: applySelected,
+    offSelected: offSelected,
+    openTemplateSheet: openTemplateSheet,
+    saveTemplateFromCurrent: saveTemplateFromCurrent,
+    applyTemplate: applyTemplate,
+    deleteTemplate: deleteTemplate,
     copyPrevious: copyPrevious,
     clearAll: clearAll,
     openDaySheet: openDaySheet,
