@@ -108,6 +108,11 @@ var App = (function () {
   // ---------- カレンダー連携（OAuth code flow） ----------
 
   function connectCalendar() {
+    if (state.inviteMode) {
+      // 招待方式では権限要求は不要（シフトの予定は自動で本人カレンダーに届く）
+      toast('カレンダーは自動連携済みです。設定は不要です。', 'info');
+      return;
+    }
     var client = google.accounts.oauth2.initCodeClient({
       client_id: GOOGLE_CLIENT_ID,
       scope: 'https://www.googleapis.com/auth/calendar.events',
