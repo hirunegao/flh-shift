@@ -921,6 +921,10 @@ function getSettings() {
   return out;
 }
 
+function splitCsv(s) {
+  return String(s || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+}
+
 function mapById(rows) {
   var out = {};
   rows.forEach(function (r) { out[r.id] = r; });
