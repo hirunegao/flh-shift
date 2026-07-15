@@ -14,6 +14,9 @@
 
 var TZ = 'Asia/Tokyo';
 
+// OAuthクライアントID（公開情報のためコードに埋め込み。スクリプトプロパティでも上書き可）
+var DEFAULT_OAUTH_CLIENT_ID = '890658818529-dq6uuj1hp3vos399ifqbu3ljdjv2gh8o.apps.googleusercontent.com';
+
 var SHEETS = {
   Staff: ['email', 'name', 'isAdmin', 'locationIds', 'active'],
   Locations: ['id', 'name', 'active'],
@@ -32,8 +35,47 @@ var DEFAULT_SETTINGS = {
 
 // ==================== エントリーポイント ====================
 
-function doGet() {
+function doGet(e) {
+  // 診断用: /exec?diag=1 で設定状況を確認（秘密情報そのものは返さない）
+  if (e && e.parameter && e.parameter.diag === '1') {
+    // 自動修復: 管理者が未登録なら登録する（setup途中失敗の救済）
+    try {
+      if (readAll('Staff').length === 0) {
+        appendRows('Staff', [{ email: 'flontlifehack@gmail.com', name: '管理者', isAdmin: 'true', locationIds: '', active: 'true' }]);
+        log('system', 'auto_admin_registered', 'flontlifehack@gmail.com');
+      }
+    } catch (err) { /* 診断結果に表示される */ }
+    var p = PropertiesService.getScriptProperties();
+    var cid = p.getProperty('OAUTH_CLIENT_ID') || '';
+    var staff = [];
+    try {
+      staff = readAll('Staff').map(function (s) {
+        var em = s.email || '';
+        return em.slice(0, 3) + '***' + em.slice(em.indexOf('@')) + ' admin=' + s.isAdmin + ' active=' + s.active;
+      });
+    } catch (err) {
+      staff = ['ERROR: ' + String(err)];
+    }
+    return jsonOut({
+      ok: true,
+      data: {
+        clientIdProp: cid ? (cid === oauthClientId() ? 'set_and_match' : 'set_but_DIFFERENT') : 'not_set(using_default)',
+        effectiveClientId: oauthClientId().slice(0, 12) + '...',
+        secretSet: !!p.getProperty('OAUTH_CLIENT_SECRET'),
+        slackSet: !!p.getProperty('SLACK_WEBHOOK_URL'),
+        sharedCalendarSet: !!p.getProperty('SHARED_CALENDAR_ID'),
+        staff: staff,
+        triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); })
+      }
+    });
+  }
   return jsonOut({ ok: true, data: { service: 'flh-shift API', time: new Date().toISOString() } });
+}
+
+/** スクリプトプロパティ優先、なければコード埋め込みのデフォルトを使用 */
+function oauthClientId() {
+  var v = props('OAUTH_CLIENT_ID');
+  return v ? v.trim() : DEFAULT_OAUTH_CLIENT_ID;
 }
 
 function doPost(e) {
@@ -117,7 +159,7 @@ function verifyIdToken(idToken) {
   var res = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(idToken), { muteHttpExceptions: true });
   if (res.getResponseCode() !== 200) throw new Error('token_expired');
   var info = JSON.parse(res.getContentText());
-  var clientId = props('OAUTH_CLIENT_ID');
+  var clientId = oauthClientId();
   if (info.aud !== clientId) throw new Error('auth_failed');
   if (info.iss !== 'https://accounts.google.com' && info.iss !== 'accounts.google.com') throw new Error('auth_failed');
   if (Number(info.exp) * 1000 < Date.now()) throw new Error('token_expired');
@@ -128,6 +170,8 @@ function verifyIdToken(idToken) {
 // ==================== API 実装 ====================
 
 function apiLogin(staff) {
+  // シークレット未設定時は「招待方式」: 個別のカレンダー連携操作は不要
+  var inviteMode = !props('OAUTH_CLIENT_SECRET');
   return {
     staff: {
       email: staff.email,
@@ -135,7 +179,8 @@ function apiLogin(staff) {
       isAdmin: String(staff.isAdmin) === 'true',
       locationIds: splitCsv(staff.locationIds)
     },
-    calendarConnected: !!getUserProp('RT_' + staff.email),
+    inviteMode: inviteMode,
+    calendarConnected: inviteMode ? true : !!getUserProp('RT_' + staff.email),
     masters: {
       locations: readAll('Locations').filter(function (r) { return String(r.active) !== 'false'; }),
       patterns: readAll('Patterns').filter(function (r) { return String(r.active) !== 'false'; })
@@ -150,7 +195,7 @@ function apiOauthExchange(staff, payload) {
     method: 'post',
     payload: {
       code: payload.code,
-      client_id: props('OAUTH_CLIENT_ID'),
+      client_id: oauthClientId(),
       client_secret: props('OAUTH_CLIENT_SECRET'),
       redirect_uri: 'postmessage',
       grant_type: 'authorization_code'
@@ -430,11 +475,15 @@ function apiAdminSaveStaff(admin, payload) {
 /**
  * 本人のGoogleカレンダーと同期。
  * confirmed=false → 「【未確定】出勤」 / confirmed=true → 「出勤」
- * 既存イベントは一旦削除して作り直す（タイトル更新はPATCH）。
+ * 方式1: OAuth連携済みなら本人カレンダーへ直接書き込み
+ * 方式2: 未連携（またはシークレット未設定）なら「招待方式」
+ *        （システム所有のカレンダーにイベントを作成し本人を招待→本人のカレンダーに自動表示）
  */
 function syncPersonalCalendar(email, periodKey, confirmed) {
   var rt = getUserProp('RT_' + email);
-  if (!rt) return { skipped: 'calendar_not_connected' };
+  if (!rt || !props('OAUTH_CLIENT_SECRET')) {
+    return syncPersonalCalendarInvite(email, periodKey, confirmed);
+  }
   var token = refreshAccessToken(rt, email);
   if (!token) return { skipped: 'token_refresh_failed' };
 
@@ -467,6 +516,52 @@ function syncPersonalCalendar(email, periodKey, confirmed) {
     }
   });
   return { updated: updated, total: shifts.length };
+}
+
+/** 招待方式: 配信用カレンダー（システム所有）を取得。なければ作成 */
+function inviteCalendar() {
+  var id = props('INVITE_CALENDAR_ID');
+  var cal = id ? CalendarApp.getCalendarById(id) : null;
+  if (!cal) {
+    cal = CalendarApp.createCalendar('FLHシフト配信', { timeZone: TZ });
+    PropertiesService.getScriptProperties().setProperty('INVITE_CALENDAR_ID', cal.getId());
+  }
+  return cal;
+}
+
+/** 招待方式での本人カレンダー同期（eventIdは 'inv:' プレフィックスで保存） */
+function syncPersonalCalendarInvite(email, periodKey, confirmed) {
+  var cal = inviteCalendar();
+  var shifts = readAll('Shifts').filter(function (r) { return r.staffEmail === email && r.periodKey === periodKey; });
+  var locations = mapById(readAll('Locations'));
+  var title = (confirmed ? '' : '【未確定】') + '出勤';
+  var updated = 0;
+
+  shifts.forEach(function (s) {
+    try {
+      if (s.eventId && s.eventId.indexOf('inv:') === 0) {
+        var ev = cal.getEventById(s.eventId.slice(4));
+        if (ev) {
+          ev.setTitle(title);
+          updated++;
+          return;
+        }
+      }
+      var locName = s.locationId && locations[s.locationId] ? locations[s.locationId].name : '';
+      var created = cal.createEvent(
+        title,
+        new Date(s.date + 'T' + pad(s.startTime) + ':00+09:00'),
+        new Date(shiftEndDateTime(s)),
+        { guests: email, sendInvites: false, description: 'FLHシフト' + (locName ? ' / ' + locName : '') }
+      );
+      s.eventId = 'inv:' + created.getId();
+      updateRowById('Shifts', s);
+      updated++;
+    } catch (e) {
+      log(email, 'calendar_invite_error', s.date + ' ' + String(e));
+    }
+  });
+  return { updated: updated, total: shifts.length, mode: 'invite' };
 }
 
 /** 共有カレンダー（管理者用・全拠点共通1つ）: add=trueで追加、falseで削除 */
@@ -515,12 +610,18 @@ function deleteShiftsAndEvents(email, periodKey) {
 
   // 本人カレンダーのイベント削除
   var rt = getUserProp('RT_' + email);
-  var token = rt ? refreshAccessToken(rt, email) : null;
+  var token = (rt && props('OAUTH_CLIENT_SECRET')) ? refreshAccessToken(rt, email) : null;
   var calId = props('SHARED_CALENDAR_ID');
   var sharedCal = calId ? CalendarApp.getCalendarById(calId) : null;
 
   shifts.forEach(function (s) {
-    if (token && s.eventId) {
+    if (s.eventId && s.eventId.indexOf('inv:') === 0) {
+      // 招待方式のイベント削除（本人のカレンダーからも消える）
+      try {
+        var invEv = inviteCalendar().getEventById(s.eventId.slice(4));
+        if (invEv) invEv.deleteEvent();
+      } catch (e) { /* 削除済み等は無視 */ }
+    } else if (token && s.eventId) {
       try { calFetch(token, 'DELETE', 'primary/events/' + s.eventId, null); } catch (e) { /* 手動削除済み等は無視 */ }
     }
     if (sharedCal && s.sharedEventId) {
@@ -538,7 +639,7 @@ function refreshAccessToken(refreshToken, email) {
     method: 'post',
     payload: {
       refresh_token: refreshToken,
-      client_id: props('OAUTH_CLIENT_ID'),
+      client_id: oauthClientId(),
       client_secret: props('OAUTH_CLIENT_SECRET'),
       grant_type: 'refresh_token'
     },

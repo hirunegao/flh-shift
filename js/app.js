@@ -8,7 +8,8 @@ var App = (function () {
     profile: null,        // { email, name, isAdmin, locationIds }
     masters: { locations: [], patterns: [] },
     settings: {},
-    calendarConnected: false
+    calendarConnected: false,
+    inviteMode: false     // true: 招待方式（個別のカレンダー連携操作は不要）
   };
 
   // ---------- 起動 ----------
@@ -67,6 +68,7 @@ var App = (function () {
       state.masters = data.masters;
       state.settings = data.settings;
       state.calendarConnected = data.calendarConnected;
+      state.inviteMode = !!data.inviteMode;
       if (!location.hash || location.hash === '#/') {
         location.hash = '#/home';
       }
@@ -155,13 +157,17 @@ var App = (function () {
       '<div class="page">' +
       '  <div class="card">' +
       '    <h3>Googleカレンダー連携</h3>' +
-      '    <p class="muted">シフトの提出・承認時に、あなたのGoogleカレンダーへ自動で予定を登録します。</p>' +
-      '    <p>状態: ' + (state.calendarConnected
-        ? '<span class="chip chip-green">連携済み</span>'
-        : '<span class="chip chip-gray">未連携</span>') + '</p>' +
-      (state.calendarConnected
-        ? ''
-        : '<button class="btn btn-primary" onclick="App.connectCalendar()">カレンダーを連携する</button>') +
+      '    <p class="muted">シフトの提出・承認時に、あなたのGoogleカレンダーへ自動で予定が入ります。</p>' +
+      '    <p>状態: ' + (state.inviteMode
+        ? '<span class="chip chip-green">自動連携（招待方式）</span>'
+        : (state.calendarConnected
+          ? '<span class="chip chip-green">連携済み</span>'
+          : '<span class="chip chip-gray">未連携</span>')) + '</p>' +
+      (state.inviteMode
+        ? '<p class="muted">シフトの予定が「FLHシフト配信」から自動で届きます。設定は不要です。</p>'
+        : (state.calendarConnected
+          ? ''
+          : '<button class="btn btn-primary" onclick="App.connectCalendar()">カレンダーを連携する</button>')) +
       '  </div>' +
       '  <div class="card">' +
       '    <h3>アカウント</h3>' +
