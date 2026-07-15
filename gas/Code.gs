@@ -37,6 +37,17 @@ var DEFAULT_SETTINGS = {
 // ==================== エントリーポイント ====================
 
 function doGet(e) {
+  // 診断用: /exec?diag=log で直近の監査ログ、?diag=templates でテンプレート保存状況
+  if (e && e.parameter && e.parameter.diag === 'log') {
+    var rows = readAll('AuditLog');
+    return jsonOut({ ok: true, data: rows.slice(-20) });
+  }
+  if (e && e.parameter && e.parameter.diag === 'templates') {
+    var trows = readAll('Templates').map(function (t) {
+      return { id: t.id, staff: (t.staffEmail || '').slice(0, 3) + '***', name: t.name, dataLength: (t.dataJson || '').length, updatedAt: t.updatedAt };
+    });
+    return jsonOut({ ok: true, data: trows });
+  }
   // 診断用: /exec?diag=1 で設定状況を確認（秘密情報そのものは返さない）
   if (e && e.parameter && e.parameter.diag === '1') {
     // 自動修復: 管理者が未登録なら登録する（setup途中失敗の救済）

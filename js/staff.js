@@ -433,20 +433,28 @@ var Staff = (function () {
     App.closeSheet();
     var name = await App.promptModal(
       'テンプレート名',
-      '<p>各曜日の最初の日の内容を「曜日パターン」として保存します。<br>例: いつもの週、テスト期間用 など</p>',
+      '<p>曜日ごとの勤務内容を「曜日パターン」として保存します。<br>（各曜日で入力がある最初の日の内容を採用。入力がない曜日は「休み」）</p>',
       '例: いつもの週', '保存'
     );
     if (!name) return;
 
-    var byWeekday = {};
+    // 各曜日について「実際に入力がある最初の日」の内容を採用する
+    var byWeekday = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
+    var filled = {};
     App.periodDates(editor.pk).forEach(function (date) {
       var w = new Date(date + 'T00:00:00').getDay();
-      if (byWeekday[w] === undefined) {
-        byWeekday[w] = (editor.entries[date] || []).map(function (en) {
+      var list = editor.entries[date] || [];
+      if (!filled[w] && list.length > 0) {
+        filled[w] = true;
+        byWeekday[w] = list.map(function (en) {
           return { patternId: en.patternId, startTime: en.startTime, endTime: en.endTime, locationId: en.locationId };
         });
       }
     });
+    if (Object.keys(filled).length === 0) {
+      App.toast('入力内容からパターンを作れませんでした', 'error');
+      return;
+    }
 
     try {
       await Api.call('saveTemplate', { name: name, data: byWeekday });
