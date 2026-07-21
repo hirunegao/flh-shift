@@ -475,6 +475,8 @@ var Staff = (function () {
       '<p class="muted">読み込み中...</p></div></div>';
     var templates = await loadTemplates();
 
+    var selCount = Object.keys(editor.selectedDays).length;
+    var applyLabel = selCount > 0 ? '選択した' + selCount + '日に適用' : '適用';
     var rows = templates.length === 0
       ? '<p class="muted">まだテンプレートがありません。<br>シフトを入力してから「現在の入力から作成」を押すと、曜日ごとのパターンとして保存されます。</p>'
       : templates.map(function (t) {
@@ -487,7 +489,7 @@ var Staff = (function () {
         return '<div class="template-row">' +
           '<div class="template-info"><b>' + esc(t.name) + '</b><br><small class="muted">' + esc(summary) + '</small></div>' +
           '<div class="template-buttons">' +
-          '  <button class="btn btn-primary btn-sm" onclick="Staff.applyTemplate(\'' + t.id + '\')">適用</button>' +
+          '  <button class="btn btn-primary btn-sm" onclick="Staff.applyTemplate(\'' + t.id + '\')">' + esc(applyLabel) + '</button>' +
           '  <button class="btn-mini danger" onclick="Staff.deleteTemplate(\'' + t.id + '\')">削除</button>' +
           '</div></div>';
       }).join('');
@@ -497,7 +499,9 @@ var Staff = (function () {
       '  <div class="sheet">' +
       '    <div class="sheet-handle"></div>' +
       '    <h3>📋 テンプレート</h3>' +
-      '    <p class="muted">曜日ごとの勤務パターンを保存して、期間全体に一括入力できます。</p>' +
+      (selCount > 0
+        ? '<p class="muted">☑ ' + selCount + '日を選択中。「適用」でその日にテンプレートの時間が入ります（他の日は変更されません）。</p>'
+        : '<p class="muted">曜日ごとの勤務パターンを保存して、期間全体に一括入力できます。<br>日付にチェックを付けてから開くと、その日だけに適用できます。</p>') +
       rows +
       '    <div class="sheet-actions">' +
       '      <button class="btn btn-outline" onclick="App.closeSheet()">閉じる</button>' +
@@ -557,15 +561,46 @@ var Staff = (function () {
     App.closeSheet();
     document.getElementById('modal-container').innerHTML = '';
     pushUndo();
+
+    var copy = function (list) {
+      return list.map(function (en) {
+        return { patternId: en.patternId, startTime: en.startTime, endTime: en.endTime, locationId: en.locationId };
+      });
+    };
+    // 代表パターン: テンプレート内で入力がある最初の曜日の内容（月→日の順）
+    var fallback = null;
+    [1, 2, 3, 4, 5, 6, 0].forEach(function (w) {
+      if (!fallback && (t.data[w] || []).length > 0) fallback = t.data[w];
+    });
+
+    var selDates = Object.keys(editor.selectedDays);
+    if (selDates.length > 0) {
+      // チェックした日だけに適用。その曜日の内容がなければ代表パターンの時間を入れる。
+      // チェックしていない日は変更しない。
+      selDates.forEach(function (date) {
+        var w = new Date(date + 'T00:00:00').getDay();
+        var list = (t.data[w] || []).length > 0 ? t.data[w] : (fallback || []);
+        if (list.length === 0) {
+          delete editor.entries[date];
+        } else {
+          editor.entries[date] = copy(list);
+        }
+      });
+      editor.selectedDays = {};
+      saveLocalDraft();
+      drawEditor();
+      App.toast('選択した' + selDates.length + '日にテンプレート「' + t.name + '」を適用しました', 'success');
+      return;
+    }
+
+    // チェックなし: 従来どおり期間全体に曜日パターンを展開
     App.periodDates(editor.pk).forEach(function (date) {
       var w = new Date(date + 'T00:00:00').getDay();
       var list = t.data[w] || [];
       if (list.length === 0) {
         delete editor.entries[date];
       } else {
-        editor.entries[date] = list.map(function (en) {
-          return { patternId: en.patternId, startTime: en.startTime, endTime: en.endTime, locationId: en.locationId };
-        });
+        editor.entries[date] = copy(list);
       }
     });
     editor.selectedDays = {};
