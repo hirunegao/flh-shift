@@ -39,13 +39,14 @@ Google Apps Script（バックエンド）
 |---|---|
 | `SPREADSHEET_ID` | STEP 1 でメモしたID |
 | `APP_URL` | `https://hirunegao.github.io/flh-shift/` |
+| `DIAG_SECRET` | 任意の長いランダム文字列（診断URL用。未設定なら診断は無効） |
 
 （`OAUTH_CLIENT_ID` などは後のSTEPで追加します）
 
 5. エディタ上部の関数選択で `setup` を選び「実行」→ 権限を承認
    → スプレッドシートに Staff / Locations / Patterns / Shifts / Submissions / ChangeRequests / Settings / AuditLog シートが自動作成されます
 6. 関数選択で `setupTriggers` を選び「実行」
-   → 毎朝10時のリマインダートリガーが登録されます
+   → 毎朝10時のリマインダー ＋ 深夜3時のスプレッドシートバックアップ（Driveフォルダ `FLHシフトDB_backup`・7日分）が登録されます
 
 ## STEP 3: GAS をWebアプリとしてデプロイ（5分）
 
@@ -153,3 +154,5 @@ var GOOGLE_CLIENT_ID = 'STEP 4 のクライアントID';
 | 通信エラーが出る | GASのデプロイ設定が「全員」になっているか確認。Code.gs更新後は「新バージョン」で再デプロイ |
 | Slack通知が来ない | `SLACK_WEBHOOK_URL` の設定漏れ。AuditLogシートに slack_error が無いか確認 |
 | リマインドが来ない | `setupTriggers` を実行したか確認（GASの「トリガー」メニューに dailyReminder があるか） |
+| 診断URLが forbidden | `DIAG_SECRET` を設定し、`?diag=1&key=その値` でアクセスする（未設定時は診断無効） |
+| バックアップが無い | `setupTriggers` 再実行。Driveに `FLHシフトDB_backup` フォルダができるか確認 |

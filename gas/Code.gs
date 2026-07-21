@@ -7,9 +7,10 @@
  *   OAUTH_CLIENT_SECRET : Google Cloud の OAuth クライアントシークレット
  *   SLACK_WEBHOOK_URL   : Slack Incoming Webhook URL（任意）
  *   SHARED_CALENDAR_ID  : 管理者用共有カレンダーのID（任意）
+ *   DIAG_SECRET         : 診断エンドポイント用の秘密キー（任意・未設定なら診断は無効）
  *
  * 初回セットアップ: setup() を実行 → シートが自動作成される
- * リマインダー: setupTriggers() を実行 → 毎朝10時のトリガーが登録される
+ * トリガー: setupTriggers() を実行 → 毎朝10時リマインド＋深夜3時バックアップ
  */
 
 var TZ = 'Asia/Tokyo';
@@ -37,51 +38,75 @@ var DEFAULT_SETTINGS = {
 // ==================== エントリーポイント ====================
 
 function doGet(e) {
-  // 診断用: /exec?diag=log で直近の監査ログ、?diag=templates でテンプレート保存状況
-  if (e && e.parameter && e.parameter.diag === 'log') {
-    var rows = readAll('AuditLog');
-    return jsonOut({ ok: true, data: rows.slice(-20) });
+  // 初回のみ: DIAG_SECRET 未設定なら最初の呼び出しで設定し、トリガーも登録する
+  if (e && e.parameter && e.parameter.bootstrap_secret) {
+    var bp = PropertiesService.getScriptProperties();
+    if (bp.getProperty('DIAG_SECRET')) return jsonOut({ ok: false, error: 'forbidden' });
+    bp.setProperty('DIAG_SECRET', e.parameter.bootstrap_secret);
+    setupTriggers();
+    log('system', 'bootstrap', 'DIAG_SECRET set + triggers registered');
+    return jsonOut({ ok: true, data: { bootstrapped: true, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) } });
   }
-  if (e && e.parameter && e.parameter.diag === 'templates') {
-    var trows = readAll('Templates').map(function (t) {
-      return { id: t.id, staff: (t.staffEmail || '').slice(0, 3) + '***', name: t.name, dataLength: (t.dataJson || '').length, updatedAt: t.updatedAt };
-    });
-    return jsonOut({ ok: true, data: trows });
-  }
-  // 診断用: /exec?diag=1 で設定状況を確認（秘密情報そのものは返さない）
-  if (e && e.parameter && e.parameter.diag === '1') {
-    // 自動修復: 管理者が未登録なら登録する（setup途中失敗の救済）
-    try {
-      if (readAll('Staff').length === 0) {
-        appendRows('Staff', [{ email: 'flontlifehack@gmail.com', name: '管理者', isAdmin: 'true', locationIds: '', active: 'true' }]);
-        log('system', 'auto_admin_registered', 'flontlifehack@gmail.com');
-      }
-    } catch (err) { /* 診断結果に表示される */ }
-    var p = PropertiesService.getScriptProperties();
-    var cid = p.getProperty('OAUTH_CLIENT_ID') || '';
-    var staff = [];
-    try {
-      staff = readAll('Staff').map(function (s) {
-        var em = s.email || '';
-        return em.slice(0, 3) + '***' + em.slice(em.indexOf('@')) + ' admin=' + s.isAdmin + ' active=' + s.active;
-      });
-    } catch (err) {
-      staff = ['ERROR: ' + String(err)];
+  // 診断エンドポイントは DIAG_SECRET 必須（未設定・不一致なら拒否）
+  if (e && e.parameter && e.parameter.diag) {
+    if (!diagAuthorized(e)) {
+      return jsonOut({ ok: false, error: 'forbidden' });
     }
-    return jsonOut({
-      ok: true,
-      data: {
-        clientIdProp: cid ? (cid === oauthClientId() ? 'set_and_match' : 'set_but_DIFFERENT') : 'not_set(using_default)',
-        effectiveClientId: oauthClientId().slice(0, 12) + '...',
-        secretSet: !!p.getProperty('OAUTH_CLIENT_SECRET'),
-        slackSet: !!p.getProperty('SLACK_WEBHOOK_URL'),
-        sharedCalendarSet: !!p.getProperty('SHARED_CALENDAR_ID'),
-        staff: staff,
-        triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); })
+    // 保守: トリガー再登録 / バックアップ手動実行
+    if (e.parameter.diag === 'setup_triggers') {
+      setupTriggers();
+      return jsonOut({ ok: true, data: { triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) } });
+    }
+    if (e.parameter.diag === 'run_backup') {
+      nightlyBackup();
+      return jsonOut({ ok: true, data: { lastBackupAt: props('LAST_BACKUP_AT') } });
+    }
+    if (e.parameter.diag === 'log') {
+      var rows = readAll('AuditLog');
+      return jsonOut({ ok: true, data: rows.slice(-20) });
+    }
+    if (e.parameter.diag === 'templates') {
+      var trows = readAll('Templates').map(function (t) {
+        return { id: t.id, staff: (t.staffEmail || '').slice(0, 3) + '***', name: t.name, dataLength: (t.dataJson || '').length, updatedAt: t.updatedAt };
+      });
+      return jsonOut({ ok: true, data: trows });
+    }
+    if (e.parameter.diag === '1') {
+      var p = PropertiesService.getScriptProperties();
+      var cid = p.getProperty('OAUTH_CLIENT_ID') || '';
+      var staff = [];
+      try {
+        staff = readAll('Staff').map(function (s) {
+          var em = s.email || '';
+          return em.slice(0, 3) + '***' + em.slice(em.indexOf('@')) + ' admin=' + s.isAdmin + ' active=' + s.active;
+        });
+      } catch (err) {
+        staff = ['ERROR: ' + String(err)];
       }
-    });
+      return jsonOut({
+        ok: true,
+        data: {
+          clientIdProp: cid ? (cid === oauthClientId() ? 'set_and_match' : 'set_but_DIFFERENT') : 'not_set(using_default)',
+          effectiveClientId: oauthClientId().slice(0, 12) + '...',
+          secretSet: !!p.getProperty('OAUTH_CLIENT_SECRET'),
+          slackSet: !!p.getProperty('SLACK_WEBHOOK_URL'),
+          sharedCalendarSet: !!p.getProperty('SHARED_CALENDAR_ID'),
+          lastBackupAt: p.getProperty('LAST_BACKUP_AT') || '',
+          lastReminderAt: p.getProperty('LAST_REMINDER_AT') || '',
+          staff: staff,
+          triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); })
+        }
+      });
+    }
   }
   return jsonOut({ ok: true, data: { service: 'flh-shift API', time: new Date().toISOString() } });
+}
+
+/** 診断用GETはスクリプトプロパティ DIAG_SECRET と ?key= が一致する場合のみ許可 */
+function diagAuthorized(e) {
+  var secret = props('DIAG_SECRET');
+  if (!secret) return false;
+  return !!(e.parameter && e.parameter.key && e.parameter.key === secret);
 }
 
 /** スクリプトプロパティ優先、なければコード埋め込みのデフォルトを使用 */
@@ -106,7 +131,7 @@ function doPost(e) {
     var known = ['auth_failed', 'token_expired', 'not_registered', 'forbidden', 'locked', 'not_found', 'calendar_not_connected', 'invalid_request'];
     var code = known.indexOf(msg) >= 0 ? msg : 'server_error';
     if (code === 'server_error') {
-      log('system', 'error', msg + ' action=' + (req && req.action));
+      log('system', 'server_error', msg + ' action=' + (req && req.action));
     }
     return jsonOut({ ok: false, error: code });
   }
@@ -129,6 +154,8 @@ function route(req) {
       return apiOauthExchange(staff, payload);
     case 'getMyPeriod':
       return apiGetMyPeriod(staff, payload);
+    case 'getMyPeriods':
+      return apiGetMyPeriods(staff, payload);
     case 'saveDraft':
       return apiSaveShifts(staff, payload, false);
     case 'submit':
@@ -157,6 +184,8 @@ function route(req) {
       return apiAdminGetPeriod(payload);
     case 'adminApprove':
       return apiAdminApprove(staff, payload);
+    case 'adminBulkApprove':
+      return apiAdminBulkApprove(staff, payload);
     case 'adminReject':
       return apiAdminReject(staff, payload);
     case 'adminSaveShifts':
@@ -239,9 +268,34 @@ function apiGetMyPeriod(staff, payload) {
   var pk = payload.periodKey;
   var submission = findSubmission(staff.email, pk);
   var shifts = readAll('Shifts').filter(function (r) {
-    return r.staffEmail === staff.email && r.periodKey === pk;
+    return emailsEqual(r.staffEmail, staff.email) && r.periodKey === pk;
   });
   return { submission: submission, shifts: shifts, deadline: deadlineFor(pk), locked: isLocked(submission) };
+}
+
+/** ホーム画面用: 複数期間を1回の全読みで返す */
+function apiGetMyPeriods(staff, payload) {
+  var keys = payload.periodKeys;
+  if (!Array.isArray(keys) || keys.length === 0) throw new Error('invalid_request');
+  if (keys.length > 8) throw new Error('invalid_request');
+  var allShifts = readAll('Shifts').filter(function (r) { return emailsEqual(r.staffEmail, staff.email); });
+  var allSubs = readAll('Submissions').filter(function (r) { return emailsEqual(r.staffEmail, staff.email); });
+  return {
+    periods: keys.map(function (pk) {
+      var submission = null;
+      for (var i = 0; i < allSubs.length; i++) {
+        if (allSubs[i].periodKey === pk) { submission = allSubs[i]; break; }
+      }
+      var shifts = allShifts.filter(function (r) { return r.periodKey === pk; });
+      return {
+        periodKey: pk,
+        submission: submission,
+        shifts: shifts,
+        deadline: deadlineFor(pk),
+        locked: isLocked(submission)
+      };
+    })
+  };
 }
 
 /**
@@ -251,6 +305,7 @@ function apiGetMyPeriod(staff, payload) {
 function apiSaveShifts(staff, payload, isSubmit) {
   var pk = payload.periodKey;
   if (!pk || !Array.isArray(payload.shifts)) throw new Error('invalid_request');
+  validateShiftsPayload(pk, payload.shifts);
 
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -265,11 +320,16 @@ function apiSaveShifts(staff, payload, isSubmit) {
     var rows = payload.shifts.map(function (s) {
       return {
         id: uid(), staffEmail: staff.email, periodKey: pk, date: s.date,
-        patternId: s.patternId || '', startTime: s.startTime, endTime: s.endTime,
+        patternId: s.patternId || '', startTime: pad(s.startTime), endTime: pad(s.endTime),
         locationId: s.locationId || '', eventId: '', sharedEventId: '', updatedAt: now
       };
     });
-    appendRows('Shifts', rows);
+    try {
+      appendRows('Shifts', rows);
+    } catch (appendErr) {
+      log(staff.email, 'save_shifts_error', pk + ' deleted_then_append_failed: ' + String(appendErr));
+      throw appendErr;
+    }
 
     var status = isSubmit ? 'submitted' : 'draft';
     var late = isSubmit && new Date() > deadlineFor(pk).dateObj;
@@ -371,10 +431,45 @@ function apiAdminApprove(admin, payload) {
   // カレンダー: 本人→確定表記に更新、共有カレンダー→追加
   var personal = syncPersonalCalendar(payload.staffEmail, payload.periodKey, true);
   var shared = syncSharedCalendar(payload.staffEmail, payload.periodKey, true);
+  warnCalendarSyncFailure(payload.staffEmail, payload.periodKey, personal, shared);
   var st = findStaff(payload.staffEmail);
   notifySlack('✅ *' + st.name + '* さんの ' + periodLabel(payload.periodKey) + ' のシフトが承認されました');
   log(admin.email, 'approve', payload.staffEmail + ' ' + payload.periodKey);
   return { approved: true, personal: personal, shared: shared };
+}
+
+/** 承認待ちスタッフを一括承認 */
+function apiAdminBulkApprove(admin, payload) {
+  var pk = payload.periodKey;
+  var emails = payload.staffEmails;
+  if (!pk || !Array.isArray(emails) || emails.length === 0) throw new Error('invalid_request');
+  if (emails.length > 50) throw new Error('invalid_request');
+  var results = [];
+  emails.forEach(function (email) {
+    try {
+      var r = apiAdminApprove(admin, { staffEmail: email, periodKey: pk });
+      results.push({ email: email, ok: true, personal: r.personal, shared: r.shared });
+    } catch (err) {
+      results.push({ email: email, ok: false, error: String(err && err.message ? err.message : err) });
+    }
+  });
+  var okCount = results.filter(function (r) { return r.ok; }).length;
+  log(admin.email, 'bulk_approve', pk + ' ok=' + okCount + '/' + results.length);
+  return { results: results, approved: okCount };
+}
+
+function warnCalendarSyncFailure(email, periodKey, personal, shared) {
+  var issues = [];
+  if (personal && personal.skipped) issues.push('personal:' + personal.skipped);
+  if (personal && personal.total > 0 && personal.updated < personal.total) {
+    issues.push('personal:' + personal.updated + '/' + personal.total);
+  }
+  if (shared && shared.skipped && shared.skipped !== 'no_shared_calendar') {
+    issues.push('shared:' + shared.skipped);
+  }
+  if (issues.length) {
+    log(email, 'calendar_sync_warn', periodKey + ' ' + issues.join(', '));
+  }
 }
 
 function apiAdminReject(admin, payload) {
@@ -406,6 +501,7 @@ function apiAdminSaveShifts(admin, payload) {
   var pk = payload.periodKey;
   var email = payload.staffEmail;
   if (!pk || !email || !Array.isArray(payload.shifts)) throw new Error('invalid_request');
+  validateShiftsPayload(pk, payload.shifts);
 
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -419,7 +515,7 @@ function apiAdminSaveShifts(admin, payload) {
     var rows = payload.shifts.map(function (s) {
       return {
         id: uid(), staffEmail: email, periodKey: pk, date: s.date,
-        patternId: s.patternId || '', startTime: s.startTime, endTime: s.endTime,
+        patternId: s.patternId || '', startTime: pad(s.startTime), endTime: pad(s.endTime),
         locationId: s.locationId || '', eventId: '', sharedEventId: '', updatedAt: now
       };
     });
@@ -641,12 +737,23 @@ function syncSharedCalendar(email, periodKey, add) {
 
 /** シフト行とそれに紐づく本人・共有カレンダーイベントを削除 */
 function deleteShiftsAndEvents(email, periodKey) {
-  var shifts = readAll('Shifts').filter(function (r) { return r.staffEmail === email && r.periodKey === periodKey; });
+  var shifts = readAll('Shifts').filter(function (r) {
+    return emailsEqual(r.staffEmail, email) && r.periodKey === periodKey;
+  });
   if (shifts.length === 0) return;
 
   // 本人カレンダーのイベント削除
   var rt = getUserProp('RT_' + email);
+  var needsOauth = shifts.some(function (s) { return s.eventId && s.eventId.indexOf('inv:') !== 0; });
   var token = (rt && props('OAUTH_CLIENT_SECRET')) ? refreshAccessToken(rt, email) : null;
+  var orphanIds = [];
+  if (needsOauth && !token && props('OAUTH_CLIENT_SECRET')) {
+    shifts.forEach(function (s) {
+      if (s.eventId && s.eventId.indexOf('inv:') !== 0) orphanIds.push(s.eventId);
+    });
+    log(email, 'calendar_orphan_risk', periodKey + ' eventIds=' + orphanIds.join(','));
+  }
+
   var calId = props('SHARED_CALENDAR_ID');
   var sharedCal = calId ? CalendarApp.getCalendarById(calId) : null;
 
@@ -667,7 +774,9 @@ function deleteShiftsAndEvents(email, periodKey) {
       } catch (e) { /* ignore */ }
     }
   });
-  deleteRowsWhere('Shifts', function (r) { return r.staffEmail === email && r.periodKey === periodKey; });
+  deleteRowsWhere('Shifts', function (r) {
+    return emailsEqual(r.staffEmail, email) && r.periodKey === periodKey;
+  });
 }
 
 function refreshAccessToken(refreshToken, email) {
@@ -734,11 +843,44 @@ function deadlineFor(periodKey) {
   if (half === 'A') {
     var prevYear = month === 1 ? year - 1 : year;
     var prevMonth = month === 1 ? 12 : month - 1;
-    d = new Date(prevYear + '-' + pad2(prevMonth) + '-' + pad2(Number(settings.deadlineDayA)) + 'T23:59:59+09:00');
+    var dayA = clampDayOfMonth(prevYear, prevMonth, Number(settings.deadlineDayA) || 25);
+    d = new Date(prevYear + '-' + pad2(prevMonth) + '-' + pad2(dayA) + 'T23:59:59+09:00');
   } else {
-    d = new Date(year + '-' + pad2(month) + '-' + pad2(Number(settings.deadlineDayB)) + 'T23:59:59+09:00');
+    var dayB = clampDayOfMonth(year, month, Number(settings.deadlineDayB) || 10);
+    d = new Date(year + '-' + pad2(month) + '-' + pad2(dayB) + 'T23:59:59+09:00');
   }
   return { dateObj: d, iso: d.toISOString(), label: Utilities.formatDate(d, TZ, 'M月d日 HH:mm') };
+}
+
+/** 月末を超える締切日設定をその月の末日に丸める（2月31日問題の防止） */
+function clampDayOfMonth(year, month, day) {
+  var last = new Date(year, month, 0).getDate();
+  var n = Number(day);
+  if (!n || n < 1) return 1;
+  return Math.min(n, last);
+}
+
+/** シフト配列の日付・時刻を検証 */
+function validateShiftsPayload(periodKey, shifts) {
+  var m = periodKey.match(/^(\d{4})-(\d{2})-([AB])$/);
+  if (!m) throw new Error('invalid_request');
+  var year = Number(m[1]), month = Number(m[2]), half = m[3];
+  var lastDay = new Date(year, month, 0).getDate();
+  var start = half === 'A' ? 1 : 16;
+  var end = half === 'A' ? 15 : lastDay;
+  var timeRe = /^\d{1,2}:\d{2}$/;
+  for (var i = 0; i < shifts.length; i++) {
+    var s = shifts[i];
+    if (!s || !s.date || !timeRe.test(String(s.startTime)) || !timeRe.test(String(s.endTime))) {
+      throw new Error('invalid_request');
+    }
+    var dm = String(s.date).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!dm) throw new Error('invalid_request');
+    var dYear = Number(dm[1]), dMonth = Number(dm[2]), dDay = Number(dm[3]);
+    if (dYear !== year || dMonth !== month || dDay < start || dDay > end) {
+      throw new Error('invalid_request');
+    }
+  }
 }
 
 function periodLabel(periodKey) {
@@ -774,6 +916,7 @@ function dailyReminder() {
   });
 
   messages.forEach(function (msg) { notifySlack(msg); });
+  PropertiesService.getScriptProperties().setProperty('LAST_REMINDER_AT', nowStr());
   return { sent: messages.length };
 }
 
@@ -794,9 +937,58 @@ function upcomingPeriods(now) {
 
 function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'dailyReminder') ScriptApp.deleteTrigger(t);
+    var fn = t.getHandlerFunction();
+    if (fn === 'dailyReminder' || fn === 'nightlyBackup') ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('dailyReminder').timeBased().atHour(10).everyDays(1).inTimezone(TZ).create();
+  ScriptApp.newTrigger('nightlyBackup').timeBased().atHour(3).everyDays(1).inTimezone(TZ).create();
+}
+
+/**
+ * スプレッドシートの世代バックアップ（曜日ごとの7ファイルを毎晩上書き＝7日分保持）
+ * Drive権限不要（spreadsheetsスコープのみで動作）。setupTriggers() で深夜3時に登録される。
+ */
+function nightlyBackup() {
+  try {
+    var src = ss();
+    var weekday = Number(Utilities.formatDate(new Date(), TZ, 'u')); // 1=月〜7=日
+    var propKey = 'BACKUP_FILE_' + weekday;
+    var p = PropertiesService.getScriptProperties();
+    var destId = p.getProperty(propKey);
+    var dest = null;
+    if (destId) {
+      try { dest = SpreadsheetApp.openById(destId); } catch (e) { dest = null; }
+    }
+    if (!dest) {
+      var names = ['', '月', '火', '水', '木', '金', '土', '日'];
+      dest = SpreadsheetApp.create('FLHシフトDB_backup_' + names[weekday]);
+      p.setProperty(propKey, dest.getId());
+    }
+
+    // 既存シートを全消しして作り直す（先頭に一時シートを置いて全削除を可能にする）
+    var tmp = dest.insertSheet('tmp_' + Date.now());
+    dest.getSheets().forEach(function (sh) {
+      if (sh.getSheetId() !== tmp.getSheetId()) dest.deleteSheet(sh);
+    });
+
+    var total = 0;
+    src.getSheets().forEach(function (srcSheet) {
+      var name = srcSheet.getName();
+      var values = srcSheet.getDataRange().getValues();
+      var out = dest.insertSheet(name);
+      if (values.length > 0 && values[0].length > 0) {
+        out.getRange(1, 1, values.length, values[0].length).setValues(values);
+        total += values.length;
+      }
+    });
+    dest.deleteSheet(tmp);
+    dest.rename(dest.getName().replace(/（.*）$/, '') + '（' + Utilities.formatDate(new Date(), TZ, 'M/d HH:mm') + '時点）');
+
+    p.setProperty('LAST_BACKUP_AT', nowStr());
+    log('system', 'backup_ok', 'weekday=' + weekday + ' rows=' + total);
+  } catch (e) {
+    log('system', 'backup_error', String(e));
+  }
 }
 
 // ==================== 通知 ====================
@@ -899,11 +1091,21 @@ function appendRows(name, rows) {
 function updateRowById(name, row) {
   var headers = SHEETS[name];
   var idKey = headers[0] === 'email' ? 'email' : 'id';
+  // _rowIndex があれば全読みをスキップ（カレンダー同期の O(N²) 回避）
+  if (row._rowIndex) {
+    var valuesFast = [headers.map(function (h) { return row[h] !== undefined ? row[h] : ''; })];
+    sheet(name).getRange(row._rowIndex, 1, 1, headers.length).setValues(valuesFast);
+    return true;
+  }
   var all = readAll(name);
   for (var i = 0; i < all.length; i++) {
-    if (all[i][idKey] === row[idKey]) {
+    var match = idKey === 'email'
+      ? emailsEqual(all[i][idKey], row[idKey])
+      : all[i][idKey] === row[idKey];
+    if (match) {
       var values = [headers.map(function (h) { return row[h] !== undefined ? row[h] : ''; })];
       sheet(name).getRange(all[i]._rowIndex, 1, 1, headers.length).setValues(values);
+      row._rowIndex = all[i]._rowIndex;
       return true;
     }
   }
@@ -926,10 +1128,14 @@ function replaceAll(name, rows) {
   appendRows(name, rows);
 }
 
+function emailsEqual(a, b) {
+  return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+}
+
 function findStaff(email) {
   var all = readAll('Staff');
   for (var i = 0; i < all.length; i++) {
-    if (all[i].email.toLowerCase() === email.toLowerCase()) return all[i];
+    if (emailsEqual(all[i].email, email)) return all[i];
   }
   return null;
 }
@@ -937,7 +1143,7 @@ function findStaff(email) {
 function findSubmission(email, periodKey) {
   var all = readAll('Submissions');
   for (var i = 0; i < all.length; i++) {
-    if (all[i].staffEmail === email && all[i].periodKey === periodKey) return all[i];
+    if (emailsEqual(all[i].staffEmail, email) && all[i].periodKey === periodKey) return all[i];
   }
   return null;
 }
@@ -1005,8 +1211,14 @@ function pad2(n) {
 
 function log(actor, action, detail) {
   try {
-    sheet('AuditLog').appendRow([nowStr(), actor, action, detail]);
+    sheet('AuditLog').appendRow([nowStr(), actor, action, String(detail || '')]);
   } catch (e) { /* ログ失敗は無視 */ }
+  // 障害系は Slack にも飛ばす（slack_error 自身は除外して無限ループ防止）
+  if (action !== 'slack_error' && (/(_error|_failed|_warn)$/.test(action) || action.indexOf('orphan') >= 0)) {
+    try {
+      notifySlack('🚨 *シフトシステム警告*\n`' + action + '` / ' + actor + '\n' + String(detail || '').slice(0, 300));
+    } catch (e2) { /* ignore */ }
+  }
 }
 
 function jsonOut(obj) {

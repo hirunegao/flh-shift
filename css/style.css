@@ -122,8 +122,15 @@ body {
   border: 1px solid var(--gray-200); background: #fff; color: var(--gray-600);
   border-radius: 8px; padding: 7px 12px; font-size: 12px; cursor: pointer;
 }
+.btn-mini:disabled { opacity: .4; cursor: not-allowed; }
 .btn-mini.danger { color: var(--red); border-color: #fecaca; }
 .btn-mini.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 700; }
+.reason-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.reason-chip {
+  border: 1px solid var(--gray-200); background: var(--gray-100); color: var(--gray-700);
+  border-radius: 999px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+}
+.reason-chip:active { background: #dbeafe; border-color: var(--accent); color: var(--accent); }
 .btn-sm { padding: 8px 14px; font-size: 13px; }
 
 /* ---------- チップ・ステータス ---------- */

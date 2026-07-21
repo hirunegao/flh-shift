@@ -12,12 +12,24 @@ var Staff = (function () {
     var periods = App.selectablePeriods();
     var results;
     try {
-      results = await Promise.all(periods.map(function (pk) {
-        return Api.call('getMyPeriod', { periodKey: pk });
-      }));
+      var bundled = await Api.call('getMyPeriods', { periodKeys: periods });
+      results = (bundled.periods || []).map(function (p) {
+        return { submission: p.submission, shifts: p.shifts || [] };
+      });
+      // 件数が合わない場合のフォールバック
+      if (results.length !== periods.length) {
+        results = periods.map(function () { return { submission: null, shifts: [] }; });
+      }
     } catch (e) {
-      App.toast(e.message, 'error');
-      results = periods.map(function () { return { submission: null, shifts: [] }; });
+      // 旧GAS未更新時は個別取得にフォールバック
+      try {
+        results = await Promise.all(periods.map(function (pk) {
+          return Api.call('getMyPeriod', { periodKey: pk });
+        }));
+      } catch (e2) {
+        App.toast(e2.message || e.message, 'error');
+        results = periods.map(function () { return { submission: null, shifts: [] }; });
+      }
     }
 
     var cards = periods.map(function (pk, i) {
@@ -92,9 +104,73 @@ var Staff = (function () {
       locked: data.locked,
       submission: data.submission,
       saving: false,
-      adminFor: null
+      adminFor: null,
+      undoStack: []
     };
+    maybeRestoreLocalDraft();
     drawEditor();
+  }
+
+  // ---------- ローカル下書き・元に戻す ----------
+
+  function draftKey(pk) { return 'flh_shift_draft_' + pk; }
+
+  function saveLocalDraft() {
+    if (!editor || editor.locked || editor.adminFor) return;
+    try {
+      localStorage.setItem(draftKey(editor.pk), JSON.stringify({
+        entries: editor.entries,
+        comment: editor.comment,
+        savedAt: Date.now()
+      }));
+    } catch (e) { /* quota 等は無視 */ }
+  }
+
+  function clearLocalDraft(pk) {
+    try { localStorage.removeItem(draftKey(pk || (editor && editor.pk))); } catch (e) { /* ignore */ }
+  }
+
+  function maybeRestoreLocalDraft() {
+    if (!editor || editor.locked || editor.adminFor) return;
+    var raw;
+    try { raw = localStorage.getItem(draftKey(editor.pk)); } catch (e) { return; }
+    if (!raw) return;
+    var local;
+    try { local = JSON.parse(raw); } catch (e) { return; }
+    if (!local || !local.entries) return;
+    var localJson = JSON.stringify(local.entries);
+    var serverJson = JSON.stringify(editor.entries);
+    if (localJson === serverJson) return;
+    // サーバーに未提出/下書きで、ローカルの方が新しければ復元
+    var status = editor.submission ? editor.submission.status : 'none';
+    if (status === 'submitted' || status === 'approved') {
+      clearLocalDraft();
+      return;
+    }
+    editor.entries = local.entries;
+    if (local.comment != null) editor.comment = local.comment;
+    setTimeout(function () {
+      App.toast('端末に保存していた下書きを復元しました', 'info');
+    }, 300);
+  }
+
+  function pushUndo() {
+    if (!editor || editor.locked) return;
+    if (!editor.undoStack) editor.undoStack = [];
+    editor.undoStack.push(JSON.stringify(editor.entries));
+    if (editor.undoStack.length > 30) editor.undoStack.shift();
+  }
+
+  function undo() {
+    if (!editor || !editor.undoStack || editor.undoStack.length === 0) {
+      App.toast('戻せる操作がありません', 'info');
+      return;
+    }
+    preserveComment();
+    editor.entries = JSON.parse(editor.undoStack.pop());
+    saveLocalDraft();
+    drawEditor();
+    App.toast('ひとつ前に戻しました', 'success');
   }
 
   /** 管理者による直接修正モード（Admin画面から呼ばれる） */
@@ -226,6 +302,8 @@ var Staff = (function () {
         '<button class="pattern-chip chip-off' + (editor.selectedChip === 'off' ? ' selected' : '') + '" onclick="Staff.selectChip(\'off\')">休み<small>クリア</small></button>' +
         '</div>' +
         '<div class="quick-actions">' +
+        '  <button class="btn-mini" onclick="Staff.undo()"' +
+          (editor.undoStack && editor.undoStack.length ? '' : ' disabled') + '>↩ 戻す</button>' +
         '  <button class="btn-mini" onclick="Staff.selectDays(\'all\')">☑ 全選択</button>' +
         '  <button class="btn-mini" onclick="Staff.selectDays(\'weekday\')">☑ 平日</button>' +
         '  <button class="btn-mini" onclick="Staff.selectDays(\'weekend\')">☑ 土日</button>' +
@@ -294,6 +372,7 @@ var Staff = (function () {
       return;
     }
     preserveComment();
+    pushUndo();
     if (editor.selectedChip === 'off') {
       delete editor.entries[date];
     } else {
@@ -303,6 +382,7 @@ var Staff = (function () {
         patternId: p.id, startTime: p.startTime, endTime: p.endTime, locationId: defaultLocationId(p)
       }];
     }
+    saveLocalDraft();
     drawEditor();
   }
 
@@ -336,6 +416,7 @@ var Staff = (function () {
       return;
     }
     preserveComment();
+    pushUndo();
     var p = editor.selectedChip === 'off'
       ? null
       : App.state.masters.patterns.filter(function (x) { return x.id === editor.selectedChip; })[0];
@@ -348,15 +429,18 @@ var Staff = (function () {
     });
     var n = Object.keys(editor.selectedDays).length;
     editor.selectedDays = {};
+    saveLocalDraft();
     drawEditor();
     App.toast(n + '日分に適用しました', 'success');
   }
 
   function offSelected() {
     preserveComment();
+    pushUndo();
     var n = Object.keys(editor.selectedDays).length;
     Object.keys(editor.selectedDays).forEach(function (date) { delete editor.entries[date]; });
     editor.selectedDays = {};
+    saveLocalDraft();
     drawEditor();
     App.toast(n + '日分を休みにしました', 'success');
   }
@@ -472,6 +556,7 @@ var Staff = (function () {
     if (!t) return;
     App.closeSheet();
     document.getElementById('modal-container').innerHTML = '';
+    pushUndo();
     App.periodDates(editor.pk).forEach(function (date) {
       var w = new Date(date + 'T00:00:00').getDay();
       var list = t.data[w] || [];
@@ -484,6 +569,7 @@ var Staff = (function () {
       }
     });
     editor.selectedDays = {};
+    saveLocalDraft();
     drawEditor();
     App.toast('テンプレート「' + t.name + '」を適用しました', 'success');
   }
@@ -515,6 +601,7 @@ var Staff = (function () {
         if (!byDate[s.date]) byDate[s.date] = [];
         byDate[s.date].push(s);
       });
+      pushUndo();
       curDates.forEach(function (date, i) {
         var src = prevDates[i] && byDate[prevDates[i]];
         if (src) {
@@ -525,6 +612,7 @@ var Staff = (function () {
           delete editor.entries[date];
         }
       });
+      saveLocalDraft();
       drawEditor();
       App.toast('前回の希望をコピーしました', 'success');
     } catch (e) {
@@ -536,13 +624,18 @@ var Staff = (function () {
     var yes = await App.confirmModal('全クリア', 'この期間の入力をすべてクリアしますか？', 'クリアする');
     if (!yes) return;
     preserveComment();
+    pushUndo();
     editor.entries = {};
+    saveLocalDraft();
     drawEditor();
   }
 
   function preserveComment() {
     var el = document.getElementById('comment-input');
-    if (el) editor.comment = el.value;
+    if (el) {
+      editor.comment = el.value;
+      saveLocalDraft();
+    }
   }
 
   // ---------- 日別詳細シート（時刻微調整・複数枠） ----------
@@ -655,7 +748,9 @@ var Staff = (function () {
   }
 
   function sheetSetOff(date) {
+    pushUndo();
     delete editor.entries[date];
+    saveLocalDraft();
     App.closeSheet();
     document.getElementById('modal-container').innerHTML = '';
     drawEditor();
@@ -672,11 +767,13 @@ var Staff = (function () {
         }
       }
     }
+    pushUndo();
     if (entries.length === 0) {
       delete editor.entries[date];
     } else {
       editor.entries[date] = entries;
     }
+    saveLocalDraft();
     document.getElementById('modal-container').innerHTML = '';
     drawEditor();
   }
@@ -702,6 +799,7 @@ var Staff = (function () {
     editor.saving = true;
     try {
       await Api.call('saveDraft', { periodKey: editor.pk, shifts: collectShifts(), comment: editor.comment });
+      clearLocalDraft();
       App.toast('下書きを保存しました', 'success');
       editor.submission = editor.submission || {};
       editor.submission.status = 'draft';
@@ -732,6 +830,7 @@ var Staff = (function () {
     App.showLoading('提出中...（カレンダー登録も行っています）');
     try {
       var result = await Api.call('submit', { periodKey: editor.pk, shifts: shifts, comment: editor.comment });
+      clearLocalDraft(editor.pk);
       App.toast('提出しました！' + (result.late ? '（締切超過として記録）' : ''), 'success');
       if (result.calendar && result.calendar.skipped === 'calendar_not_connected') {
         App.toast('カレンダー未連携のため予定は登録されていません', 'info');
@@ -841,6 +940,7 @@ var Staff = (function () {
     sheetSave: sheetSave,
     saveDraft: saveDraft,
     submit: submit,
-    requestChange: requestChange
+    requestChange: requestChange,
+    undo: undo
   };
 })();

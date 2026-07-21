@@ -115,7 +115,10 @@ var Admin = (function () {
     }).join('');
 
     var submittedCount = current.data.submissions.filter(function (s) { return s.status === 'submitted'; }).length;
-    return '<p class="muted">承認待ち: ' + submittedCount + '名</p>' + cards +
+    var bulkBar = submittedCount > 0
+      ? '<button class="btn btn-primary btn-block" onclick="Admin.bulkApprove()">✓ 承認待ち' + submittedCount + '名をまとめて承認</button>'
+      : '';
+    return '<p class="muted">承認待ち: ' + submittedCount + '名</p>' + bulkBar + cards +
       '<button class="btn btn-outline btn-block" onclick="Admin.exportCsv()">📄 CSVダウンロード</button>';
   }
 
@@ -124,16 +127,68 @@ var Admin = (function () {
     if (!yes) return;
     App.showLoading('承認中...（カレンダー更新）');
     try {
-      await Api.call('adminApprove', { staffEmail: email, periodKey: current.pk });
+      var result = await Api.call('adminApprove', { staffEmail: email, periodKey: current.pk });
       App.toast('承認しました', 'success');
+      if (result && result.personal && result.personal.skipped) {
+        App.toast('カレンダー同期に注意: ' + result.personal.skipped, 'info');
+      }
     } catch (e) {
       App.toast(e.message, 'error');
     }
     render([current.tab, current.pk]);
   }
 
+  async function bulkApprove() {
+    var emails = current.data.submissions
+      .filter(function (s) { return s.status === 'submitted'; })
+      .map(function (s) { return s.staffEmail; });
+    if (emails.length === 0) {
+      App.toast('承認待ちのスタッフがいません', 'info');
+      return;
+    }
+    var names = emails.map(nameOf).join('、');
+    var yes = await App.confirmModal(
+      '一括承認',
+      '<p>承認待ち <b>' + emails.length + '名</b> をまとめて承認しますか？</p>' +
+      '<p class="muted">' + esc(names) + '</p>' +
+      '<p class="muted">各人のカレンダー更新を順に行うため、人数が多いと時間がかかります。</p>',
+      emails.length + '名を承認する'
+    );
+    if (!yes) return;
+    App.showLoading('一括承認中...（' + emails.length + '名・カレンダー更新）');
+    try {
+      var result = await Api.call('adminBulkApprove', { periodKey: current.pk, staffEmails: emails });
+      var fail = (result.results || []).filter(function (r) { return !r.ok; });
+      if (fail.length === 0) {
+        App.toast(result.approved + '名を承認しました', 'success');
+      } else {
+        App.toast(result.approved + '名承認 / ' + fail.length + '名失敗', 'error');
+      }
+    } catch (e) {
+      App.toast(e.message, 'error');
+    }
+    render([current.tab, current.pk]);
+  }
+
+  var REJECT_PRESETS = [
+    '人数不足のため調整をお願いします',
+    '希望時間が他のスタッフと重なっています',
+    '別日での出勤をお願いします',
+    '提出内容を確認のうえ再提出してください'
+  ];
+
   async function reject(email) {
-    var reason = await App.promptModal('差し戻し', '<p>' + esc(nameOf(email)) + ' さんに差し戻します。理由を入力してください。</p>', '例: 20日の人数が足りないため調整をお願いします', '差し戻す');
+    var chips = REJECT_PRESETS.map(function (t, i) {
+      return '<button type="button" class="reason-chip" onclick="document.getElementById(\'modal-input\').value=' +
+        JSON.stringify(t) + '">' + esc(t) + '</button>';
+    }).join('');
+    var reason = await App.promptModal(
+      '差し戻し',
+      '<p>' + esc(nameOf(email)) + ' さんに差し戻します。理由を入力してください。</p>' +
+      '<div class="reason-chips">' + chips + '</div>',
+      '例: 20日の人数が足りないため調整をお願いします',
+      '差し戻す'
+    );
     if (!reason) return;
     App.showLoading('差し戻し中...');
     try {
@@ -453,6 +508,7 @@ var Admin = (function () {
     render: render,
     switchTab: switchTab,
     approve: approve,
+    bulkApprove: bulkApprove,
     reject: reject,
     edit: edit,
     resolveRequest: resolveRequest,

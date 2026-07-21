@@ -214,6 +214,13 @@ var App = (function () {
     return dates;
   }
 
+  function clampDayOfMonth(year, month, day) {
+    var last = new Date(year, month, 0).getDate();
+    var n = Number(day);
+    if (!n || n < 1) return 1;
+    return Math.min(n, last);
+  }
+
   function deadlineFor(pk) {
     var p = parsePeriod(pk);
     var dayA = Number(state.settings.deadlineDayA || 25);
@@ -221,9 +228,9 @@ var App = (function () {
     if (p.half === 'A') {
       var py = p.month === 1 ? p.year - 1 : p.year;
       var pm = p.month === 1 ? 12 : p.month - 1;
-      return new Date(py, pm - 1, dayA, 23, 59, 59);
+      return new Date(py, pm - 1, clampDayOfMonth(py, pm, dayA), 23, 59, 59);
     }
-    return new Date(p.year, p.month - 1, dayB, 23, 59, 59);
+    return new Date(p.year, p.month - 1, clampDayOfMonth(p.year, p.month, dayB), 23, 59, 59);
   }
 
   /** 提出対象の期間（未来の3期間）＋現在進行中の期間 */
