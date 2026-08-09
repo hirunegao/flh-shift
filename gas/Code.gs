@@ -122,6 +122,13 @@ function doPost(e) {
   } catch (err) {
     return jsonOut({ ok: false, error: 'invalid_request' });
   }
+  // 出張精算 / 交通費精算（ポータル側ログイン済み）。シフトの Google idToken は不要。
+  if (req && req.service === 'travel') {
+    return travelHandlePost(req, e);
+  }
+  if (req && req.service === 'transport') {
+    return transportHandlePost(req, e);
+  }
   try {
     var result = route(req);
     return jsonOut({ ok: true, data: result });
