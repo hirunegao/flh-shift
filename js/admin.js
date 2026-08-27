@@ -307,10 +307,35 @@ var Admin = (function () {
     } else if (noWage > 0) {
       warn = '<br><span class="muted">※ 時給未設定 ' + noWage + '名は人件費に含まれていません（Notionの「名前」とシフトのスタッフ名を一致させてください）</span>';
     }
+
+    // 日毎の内訳（全員分の合計時間・予測人件費）
+    var dayRows = App.periodDates(current.pk).map(function (d) {
+      var h = 0, c = 0;
+      current.data.shifts.forEach(function (s) {
+        if (s.date !== d) return;
+        var sh = shiftHours(s);
+        h += sh;
+        var w = wageOf(nameOf(s.staffEmail));
+        if (w != null) c += sh * w;
+      });
+      return '<tr>' +
+        '<td>' + esc(App.dateLabel(d)) + '</td>' +
+        '<td class="num">' + (h > 0 ? fmtH(h) : '—') + '</td>' +
+        '<td class="num">' + (c > 0 ? fmtYen(c) : '—') + '</td>' +
+        '</tr>';
+    }).join('');
+    var detail =
+      '<details class="summary-detail"><summary>📅 日毎の内訳（全員分）</summary>' +
+      '<table class="summary-table"><thead><tr><th>日付</th><th>合計時間</th><th>予測人件費</th></tr></thead>' +
+      '<tbody>' + dayRows +
+      '<tr class="summary-total-row"><td>期間合計</td><td class="num">' + fmtH(totalHours) + '</td><td class="num">' + fmtYen(totalCost) + '</td></tr>' +
+      '</tbody></table></details>';
+
     return '<div class="card summary-card">' +
       '📊 ' + esc(App.periodLabelShort(current.pk)) + ' の希望: 合計 <b>' + fmtH(totalHours) + '</b> ・ 予測人件費 <b class="summary-cost">' + fmtYen(totalCost) + '</b>' +
       ' <button class="btn-mini" onclick="Admin.refreshWages()" title="Notionから時給を再取得">🔄 時給</button>' +
       warn +
+      detail +
       (wageState.configured && wageState.fetchedAt ? '<div class="muted summary-fetched">時給: Notionから ' + esc(wageState.fetchedAt) + ' 取得</div>' : '') +
       '</div>';
   }

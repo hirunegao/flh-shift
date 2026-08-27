@@ -350,6 +350,13 @@ body {
 .summary-cost { color: var(--accent-dark); }
 .summary-fetched { font-size: 11px; margin-top: 4px; }
 .approve-hours { font-size: 12px; margin: 6px 0 2px; }
+.summary-detail { margin-top: 8px; }
+.summary-detail summary { cursor: pointer; font-weight: 700; color: var(--accent-dark); padding: 4px 0; }
+.summary-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+.summary-table th, .summary-table td { border-bottom: 1px solid var(--gray-100); padding: 4px 6px; text-align: left; }
+.summary-table th { background: var(--gray-50); font-size: 11px; color: var(--gray-600); }
+.summary-table td.num, .summary-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.summary-total-row td { font-weight: 700; border-top: 2px solid var(--gray-200); border-bottom: none; }
 
 /* カレンダービュー */
 .cal-legend { display: flex; gap: 8px; margin-bottom: 8px; }
