@@ -5,6 +5,8 @@
 var Admin = (function () {
   var esc = function (s) { return App.esc(s); };
   var current = { pk: null, tab: 'approve', data: null };
+  // Notionから取得した時給 { loaded, configured, map: {正規化名: 時給|null}, fetchedAt, error }
+  var wageState = { loaded: false, configured: true, map: {}, fetchedAt: '', error: false };
 
   async function render(params) {
     // #/admin/:tab?/:pk?
@@ -23,7 +25,33 @@ var Admin = (function () {
       App.toast(e.message, 'error');
       current.data = { submissions: [], shifts: [], staff: [], changeRequests: [] };
     }
+    await ensureWages();
     draw();
+  }
+
+  async function ensureWages(force) {
+    if (wageState.loaded && !force) return;
+    try {
+      var res = await Api.call('adminGetWages', force ? { refresh: true } : {});
+      wageState = {
+        loaded: true,
+        configured: res.configured !== false,
+        map: res.wages || {},
+        fetchedAt: res.fetchedAt || '',
+        error: false
+      };
+    } catch (e) {
+      wageState.loaded = true;
+      wageState.error = true;
+    }
+  }
+
+  async function refreshWages() {
+    App.showLoading('Notionから時給を取得中...');
+    wageState.loaded = false;
+    await ensureWages(true);
+    App.toast(wageState.error ? '時給を取得できませんでした' : '時給を更新しました', wageState.error ? 'error' : 'success');
+    if (current.tab === 'master') drawMaster(); else draw();
   }
 
   function nav(tab, pk) {
@@ -101,6 +129,15 @@ var Admin = (function () {
       } else {
         buttons = '<button class="btn btn-outline" onclick="Admin.edit(\'' + st.email + '\')">代理入力</button>';
       }
+      var hrs = hoursOf(st.email);
+      var wage = wageOf(st.name);
+      var hoursLine = hrs > 0
+        ? '<div class="approve-hours">🕐 実働 合計 <b>' + fmtH(hrs) + '</b>' +
+          (wage == null
+            ? ' <span class="chip chip-gray">時給未設定</span>'
+            : ' <span class="chip chip-blue">予測 ' + fmtYen(hrs * wage) + '</span> <span class="muted">（' + fmtYen(wage) + '/h）</span>') +
+          '</div>'
+        : '';
       return '<div class="card approve-card status-border-' + status + '">' +
         '<div class="approve-card-top">' +
         '  <b>' + esc(st.name) + '</b>' +
@@ -109,6 +146,7 @@ var Admin = (function () {
         '</div>' +
         '<div class="muted">' + (shiftCount[st.email] || 0) + '件の希望' +
         (sub && sub.submittedAt ? ' ・ 提出 ' + esc(sub.submittedAt).slice(5, 16) : '') + '</div>' +
+        hoursLine +
         (sub && sub.comment ? '<div class="comment-box">💬 ' + esc(sub.comment) + '</div>' : '') +
         '<div class="approve-buttons">' + buttons + '</div>' +
         '</div>';
@@ -118,7 +156,7 @@ var Admin = (function () {
     var bulkBar = submittedCount > 0
       ? '<button class="btn btn-primary btn-block" onclick="Admin.bulkApprove()">✓ 承認待ち' + submittedCount + '名をまとめて承認</button>'
       : '';
-    return '<p class="muted">承認待ち: ' + submittedCount + '名</p>' + bulkBar + cards +
+    return summaryHtml() + '<p class="muted">承認待ち: ' + submittedCount + '名</p>' + bulkBar + cards +
       '<button class="btn btn-outline btn-block" onclick="Admin.exportCsv()">📄 CSVダウンロード</button>';
   }
 
@@ -211,6 +249,72 @@ var Admin = (function () {
     return st ? st.name : email;
   }
 
+  // ---------- 実働時間・時給 ----------
+
+  function parseTime(t) {
+    var m = /^(\d{1,2}):(\d{2})/.exec(String(t || ''));
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  }
+
+  /** 1枠の実働時間（時間単位）。終了<=開始は日跨ぎとみなす */
+  function shiftHours(s) {
+    var st = parseTime(s.startTime), en = parseTime(s.endTime);
+    if (st == null || en == null) return 0;
+    if (en <= st) en += 24 * 60;
+    return (en - st) / 60;
+  }
+
+  /** その期間のスタッフの合計実働時間 */
+  function hoursOf(email) {
+    var sum = 0;
+    current.data.shifts.forEach(function (s) {
+      if (s.staffEmail === email) sum += shiftHours(s);
+    });
+    return sum;
+  }
+
+  function nameKey(s) { return String(s || '').replace(/[\s　]/g, ''); }
+
+  /** Notion時給。見つからない/未設定は null */
+  function wageOf(name) {
+    var w = wageState.map[nameKey(name)];
+    return (typeof w === 'number') ? w : null;
+  }
+
+  function fmtH(h) {
+    var r = Math.round(h * 10) / 10;
+    return (r % 1 === 0 ? String(r) : r.toFixed(1)) + 'h';
+  }
+
+  function fmtYen(n) {
+    return '¥' + String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  /** 期間サマリー（合計時間・予測人件費）のカード */
+  function summaryHtml() {
+    var totalHours = 0, totalCost = 0, noWage = 0;
+    current.data.staff.forEach(function (st) {
+      var h = hoursOf(st.email);
+      totalHours += h;
+      var w = wageOf(st.name);
+      if (w == null) { if (h > 0) noWage++; } else { totalCost += h * w; }
+    });
+    var warn = '';
+    if (!wageState.configured) {
+      warn = '<br><span class="muted">⚠️ Notion未連携のため時給を表示できません（GASのスクリプトプロパティに NOTION_TOKEN を設定してください）</span>';
+    } else if (wageState.error) {
+      warn = '<br><span class="muted">⚠️ Notionから時給を取得できませんでした。時間のみ表示しています。</span>';
+    } else if (noWage > 0) {
+      warn = '<br><span class="muted">※ 時給未設定 ' + noWage + '名は人件費に含まれていません（Notionの「名前」とシフトのスタッフ名を一致させてください）</span>';
+    }
+    return '<div class="card summary-card">' +
+      '📊 ' + esc(App.periodLabelShort(current.pk)) + ' の希望: 合計 <b>' + fmtH(totalHours) + '</b> ・ 予測人件費 <b class="summary-cost">' + fmtYen(totalCost) + '</b>' +
+      ' <button class="btn-mini" onclick="Admin.refreshWages()" title="Notionから時給を再取得">🔄 時給</button>' +
+      warn +
+      (wageState.configured && wageState.fetchedAt ? '<div class="muted summary-fetched">時給: Notionから ' + esc(wageState.fetchedAt) + ' 取得</div>' : '') +
+      '</div>';
+  }
+
   // ---------- グリッドタブ ----------
 
   function gridView() {
@@ -240,7 +344,12 @@ var Admin = (function () {
         }).join('');
         return '<td class="' + App.weekdayClass(d) + '">' + (content || '<span class="grid-off">·</span>') + '</td>';
       }).join('');
-      return '<tr><th class="grid-name">' + esc(st.name) + '<br>' + App.statusChip(status) + '</th>' + tds + '</tr>';
+      var hrs = hoursOf(st.email);
+      var wage = wageOf(st.name);
+      var totalLine = hrs > 0
+        ? '<br><span class="grid-total">' + fmtH(hrs) + (wage == null ? '' : ' ' + fmtYen(hrs * wage)) + '</span>'
+        : '';
+      return '<tr><th class="grid-name">' + esc(st.name) + '<br>' + App.statusChip(status) + totalLine + '</th>' + tds + '</tr>';
     }).join('');
 
     // 日毎人数集計
@@ -251,10 +360,31 @@ var Admin = (function () {
       return '<td class="grid-count' + (n === 0 ? ' zero' : '') + '">' + n + '</td>';
     }).join('');
 
-    return '<div class="grid-wrap"><table class="grid-table">' +
+    // 日毎の合計実働時間
+    var hourCols = dates.map(function (d) {
+      var sum = 0;
+      current.data.shifts.forEach(function (s) { if (s.date === d) sum += shiftHours(s); });
+      return '<td class="grid-count' + (sum === 0 ? ' zero' : '') + '">' + (sum > 0 ? fmtH(sum) : '0') + '</td>';
+    }).join('');
+
+    // 日毎の予測人件費（時給未設定のスタッフは除く）
+    var costCols = dates.map(function (d) {
+      var sum = 0;
+      current.data.shifts.forEach(function (s) {
+        if (s.date !== d) return;
+        var w = wageOf(nameOf(s.staffEmail));
+        if (w != null) sum += shiftHours(s) * w;
+      });
+      return '<td class="grid-count' + (sum === 0 ? ' zero' : '') + '">' + (sum > 0 ? fmtYen(sum) : '-') + '</td>';
+    }).join('');
+
+    return summaryHtml() +
+      '<div class="grid-wrap"><table class="grid-table">' +
       '<thead><tr><th class="grid-name">スタッフ</th>' + headCols + '</tr></thead>' +
       '<tbody>' + bodyRows +
       '<tr class="grid-count-row"><th class="grid-name">👥 人数</th>' + countCols + '</tr>' +
+      '<tr class="grid-count-row"><th class="grid-name">🕐 時間</th>' + hourCols + '</tr>' +
+      '<tr class="grid-count-row"><th class="grid-name">💴 予測</th>' + costCols + '</tr>' +
       '</tbody></table></div>' +
       '<p class="muted center">全ステータスの希望を表示しています（横スクロールできます）</p>' +
       '<button class="btn btn-outline btn-block" onclick="Admin.exportCsv()">📄 CSVダウンロード</button>';
@@ -347,13 +477,16 @@ var Admin = (function () {
     });
 
     var lines = [];
-    lines.push(['スタッフ', 'ステータス'].concat(dates.map(function (d) { return d.slice(5); })).join(','));
+    lines.push(['スタッフ', 'ステータス'].concat(dates.map(function (d) { return d.slice(5); }))
+      .concat(['合計時間(h)', '時給', '予測人件費']).join(','));
     current.data.staff.forEach(function (st) {
       var sub = subByEmail[st.email];
       var status = sub ? (App.STATUS_INFO[sub.status] || {}).label || sub.status : '未入力';
+      var hrs = Math.round(hoursOf(st.email) * 10) / 10;
+      var wage = wageOf(st.name);
       var row = [st.name, status].concat(dates.map(function (d) {
         return '"' + ((cell[st.email + '|' + d] || []).join(' / ') || '休') + '"';
-      }));
+      })).concat([hrs, wage == null ? '' : wage, wage == null ? '' : Math.round(hrs * wage)]);
       lines.push(row.join(','));
     });
 
@@ -384,6 +517,7 @@ var Admin = (function () {
       location.hash = '#/admin/approve';
       return;
     }
+    await ensureWages();
     drawMaster();
   }
 
@@ -421,6 +555,10 @@ var Admin = (function () {
     };
 
     var staffRows = masterData.staff.map(function (st, i) {
+      var w = wageOf(st.name);
+      var wageChip = !wageState.loaded ? ''
+        : '<span class="chip ' + (w == null ? 'chip-gray' : 'chip-green') + '" title="NotionのスタッフDBから取得">' +
+          (w == null ? '時給未設定' : fmtYen(w) + '/h') + '</span>';
       return '<div class="master-card' + (String(st.active) === 'false' ? ' inactive' : '') + '">' +
         '<div class="master-row">' +
         '  <input type="text" value="' + esc(st.name) + '" onchange="Admin.mStaff(' + i + ',\'name\',this.value)" placeholder="名前">' +
@@ -431,6 +569,7 @@ var Admin = (function () {
         '    onchange="Admin.mStaff(' + i + ',\'isAdmin\',this.checked?\'true\':\'false\')">管理者</label>' +
         '  <label class="loc-check"><input type="checkbox"' + (String(st.active) !== 'false' ? ' checked' : '') +
         '    onchange="Admin.mStaff(' + i + ',\'active\',this.checked?\'true\':\'false\')">有効</label>' +
+        wageChip +
         locChecks(st, i) +
         '</div>' +
         '</div>';
@@ -513,6 +652,7 @@ var Admin = (function () {
     edit: edit,
     resolveRequest: resolveRequest,
     exportCsv: exportCsv,
+    refreshWages: refreshWages,
     mLoc: mLoc, mLocAdd: mLocAdd, mLocDel: mLocDel,
     mPat: mPat, mPatAdd: mPatAdd, mPatDel: mPatDel,
     mStaff: mStaff, mStaffAdd: mStaffAdd, mStaffLoc: mStaffLoc,

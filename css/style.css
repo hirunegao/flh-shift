@@ -342,6 +342,14 @@ body {
 .grid-off { color: var(--gray-200); }
 .grid-count-row td { font-weight: 700; background: var(--gray-50); color: var(--gray-900); }
 .grid-count.zero { color: var(--red); }
+.grid-total { font-size: 10px; font-weight: 700; color: var(--accent-dark); }
+
+/* 実働時間・予測人件費サマリー */
+.summary-card { font-size: 13px; line-height: 1.6; }
+.summary-card b { font-size: 15px; }
+.summary-cost { color: var(--accent-dark); }
+.summary-fetched { font-size: 11px; margin-top: 4px; }
+.approve-hours { font-size: 12px; margin: 6px 0 2px; }
 
 /* カレンダービュー */
 .cal-legend { display: flex; gap: 8px; margin-bottom: 8px; }

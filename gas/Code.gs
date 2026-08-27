@@ -8,6 +8,9 @@
  *   SLACK_WEBHOOK_URL   : Slack Incoming Webhook URL（任意）
  *   SHARED_CALENDAR_ID  : 管理者用共有カレンダーのID（任意）
  *   DIAG_SECRET         : 診断エンドポイント用の秘密キー（任意・未設定なら診断は無効）
+ *   NOTION_TOKEN        : Notion内部連携トークン（任意・管理画面の時給取得用）
+ *   NOTION_STAFF_DB_ID  : Notion「スタッフ」DBのID（任意・未設定ならデフォルト値）
+ *   NOTION_WAGE_DB_ID   : Notion「時給表」DBのID（任意・未設定ならデフォルト値）
  *
  * 初回セットアップ: setup() を実行 → シートが自動作成される
  * トリガー: setupTriggers() を実行 → 毎朝10時リマインド＋深夜3時バックアップ
@@ -203,6 +206,8 @@ function route(req) {
       return apiAdminSaveMaster(staff, payload);
     case 'adminGetStaff':
       return readAll('Staff');
+    case 'adminGetWages':
+      return apiAdminGetWages(payload);
     case 'adminSaveStaff':
       return apiAdminSaveStaff(staff, payload);
     case 'adminRunReminder':
@@ -1177,6 +1182,105 @@ function splitCsv(s) {
 function mapById(rows) {
   var out = {};
   rows.forEach(function (r) { out[r.id] = r; });
+  return out;
+}
+
+// ==================== Notion 時給連携 ====================
+
+var NOTION_API_VERSION = '2022-06-28';
+var DEFAULT_NOTION_STAFF_DB_ID = '6a329f7535634268a010420f5fe98dfe'; // 「スタッフ」DB
+var DEFAULT_NOTION_WAGE_DB_ID = '2b4b03853d6e431ab47930963063fa56';  // 「時給表」DB
+
+/**
+ * NotionのスタッフDBから時給一覧を取得（管理者専用）。
+ * 返却: { configured, wages: { 正規化した名前: 時給|null }, fetchedAt }
+ * 時給は「時給」ロールアップを優先し、取れない場合は「時給表」リレーション先の数値を引く。
+ * 6時間キャッシュ。payload.refresh = true で再取得。
+ */
+function apiAdminGetWages(payload) {
+  var token = props('NOTION_TOKEN');
+  if (!token) return { configured: false, wages: {}, fetchedAt: '' };
+
+  var cache = CacheService.getScriptCache();
+  var cacheKey = 'notion_wages_v1';
+  if (!(payload && payload.refresh)) {
+    var hit = cache.get(cacheKey);
+    if (hit) {
+      try { return JSON.parse(hit); } catch (e) { /* 壊れたキャッシュは無視 */ }
+    }
+  }
+
+  var wageDbId = props('NOTION_WAGE_DB_ID') || DEFAULT_NOTION_WAGE_DB_ID;
+  var staffDbId = props('NOTION_STAFF_DB_ID') || DEFAULT_NOTION_STAFF_DB_ID;
+
+  // 時給表: ページID（ハイフン無し）→ 時給
+  var wageById = {};
+  notionQueryAll(token, wageDbId, function (page) {
+    var p = page.properties || {};
+    var w = p['時給'];
+    return {
+      id: String(page.id).replace(/-/g, ''),
+      wage: (w && typeof w.number === 'number') ? w.number : null
+    };
+  }).forEach(function (r) { wageById[r.id] = r.wage; });
+
+  // スタッフ: 名前 → 時給
+  var wages = {};
+  notionQueryAll(token, staffDbId, function (page) {
+    var p = page.properties || {};
+    var name = '';
+    var titleProp = p['名前'];
+    if (titleProp && titleProp.title) {
+      name = titleProp.title.map(function (t) { return t.plain_text; }).join('');
+    }
+    var wage = null;
+    var roll = p['時給'];
+    if (roll && roll.rollup && typeof roll.rollup.number === 'number') {
+      wage = roll.rollup.number;
+    }
+    if (wage == null) {
+      var rel = p['時給表'];
+      if (rel && rel.relation && rel.relation.length) {
+        var rid = String(rel.relation[0].id).replace(/-/g, '');
+        if (wageById[rid] != null) wage = wageById[rid];
+      }
+    }
+    return { name: name, wage: wage };
+  }).forEach(function (r) {
+    if (r.name) wages[notionNameKey(r.name)] = r.wage;
+  });
+
+  var out = { configured: true, wages: wages, fetchedAt: nowStr() };
+  try { cache.put(cacheKey, JSON.stringify(out), 21600); } catch (e) { /* キャッシュ不要 */ }
+  return out;
+}
+
+/** 名前の照合キー: 半角・全角スペースを除去（Notionとシフト側の表記揺れを吸収） */
+function notionNameKey(s) {
+  return String(s || '').replace(/[\s　]/g, '');
+}
+
+function notionQueryAll(token, dbId, mapFn) {
+  var out = [];
+  var cursor = null;
+  do {
+    var body = { page_size: 100 };
+    if (cursor) body.start_cursor = cursor;
+    var res = UrlFetchApp.fetch('https://api.notion.com/v1/databases/' + dbId + '/query', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'Authorization': 'Bearer ' + token, 'Notion-Version': NOTION_API_VERSION },
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) {
+      log('system', 'notion_error', 'db=' + dbId + ' code=' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 200));
+      throw new Error('server_error');
+    }
+    var json = JSON.parse(res.getContentText());
+    (json.results || []).forEach(function (page) { out.push(mapFn(page)); });
+    cursor = json.has_more ? json.next_cursor : null;
+  } while (cursor);
   return out;
 }
 
