@@ -210,6 +210,8 @@ function route(req) {
       return apiAdminGetWages(payload);
     case 'adminSaveStaff':
       return apiAdminSaveStaff(staff, payload);
+    case 'adminSyncCalendarShare':
+      return apiAdminSyncCalendarShare(staff);
     case 'adminRunReminder':
       return dailyReminder();
   }
@@ -611,7 +613,14 @@ function apiAdminSaveStaff(admin, payload) {
   }).filter(function (r) { return r.email; });
   replaceAll('Staff', rows);
   log(admin.email, 'save_staff', 'count=' + rows.length);
-  return { saved: rows.length };
+  // 新規スタッフにも共有カレンダーを自動共有（失敗しても保存自体は成功扱い）
+  var share = { shared: [], already: [], failed: [] };
+  try {
+    share = syncSharedCalendarAcl(false);
+  } catch (e) {
+    log('system', 'calendar_share_warn', String(e && e.message ? e.message : e));
+  }
+  return { saved: rows.length, calendarShare: share };
 }
 
 // ==================== カレンダー同期 ====================
@@ -745,6 +754,103 @@ function syncSharedCalendar(email, periodKey, add) {
     }
   });
   return { synced: count };
+}
+
+// ---------- 共有カレンダーのスタッフ共有（ACL） ----------
+
+/**
+ * 共有カレンダーを全有効スタッフに「閲覧者」として共有する（管理者専用）。
+ * 未設定なら共有カレンダーを自動作成。新たに共有したスタッフにはメールで通知。
+ */
+function apiAdminSyncCalendarShare(admin) {
+  var result = syncSharedCalendarAcl(true);
+  log(admin.email, 'calendar_share_sync', 'shared=' + result.shared.length + ' already=' + result.already.length + ' failed=' + result.failed.length);
+  return result;
+}
+
+/**
+ * 共有カレンダーのACLをStaffシートと同期（追加のみ・削除はしない）。
+ * notify=true で新規共有スタッフにメール通知。
+ * 返却: { calendarId, shared: [名前], already: [名前], failed: [名前] }
+ */
+function syncSharedCalendarAcl(notify) {
+  var calId = props('SHARED_CALENDAR_ID');
+  if (!calId) {
+    var cal = CalendarApp.createCalendar('FLHシフト（全体）', { timeZone: TZ });
+    calId = cal.getId();
+    PropertiesService.getScriptProperties().setProperty('SHARED_CALENDAR_ID', calId);
+    log('system', 'shared_calendar_created', calId);
+  }
+  var existing = listCalendarAcl(calId);
+  var staff = readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; });
+  var result = { calendarId: calId, shared: [], already: [], failed: [] };
+  staff.forEach(function (s) {
+    var email = String(s.email || '').toLowerCase();
+    if (!email) return;
+    if (existing[email]) { result.already.push(s.name); return; }
+    try {
+      insertCalendarAcl(calId, email);
+      result.shared.push(s.name);
+      if (notify) notifyCalendarShared(s);
+    } catch (e) {
+      result.failed.push(s.name);
+    }
+  });
+  return result;
+}
+
+function listCalendarAcl(calId) {
+  var out = {};
+  var pageToken = null;
+  do {
+    var url = 'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId) + '/acl?maxResults=250' +
+      (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
+    var res = UrlFetchApp.fetch(url, {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) {
+      log('system', 'calendar_acl_error', 'list code=' + res.getResponseCode());
+      throw new Error('server_error');
+    }
+    var json = JSON.parse(res.getContentText());
+    (json.items || []).forEach(function (item) {
+      if (item.scope && item.scope.type === 'user') out[String(item.scope.value).toLowerCase()] = item.role;
+    });
+    pageToken = json.nextPageToken || null;
+  } while (pageToken);
+  return out;
+}
+
+function insertCalendarAcl(calId, email) {
+  var res = UrlFetchApp.fetch('https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId) + '/acl', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    payload: JSON.stringify({ role: 'reader', scope: { type: 'user', value: email } }),
+    muteHttpExceptions: true
+  });
+  if (res.getResponseCode() !== 200) {
+    log('system', 'calendar_acl_error', 'insert ' + email + ' code=' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 200));
+    throw new Error('server_error');
+  }
+}
+
+/** 共有開始のお知らせメール（失敗しても共有自体は成功扱い） */
+function notifyCalendarShared(staff) {
+  try {
+    var subject = '【FLHシフト】確定シフトの共有カレンダーが見られるようになりました';
+    var body = staff.name + ' さん\n\n' +
+      '確定した全員分のシフトが載っている共有カレンダー「FLHシフト（全体）」が、あなたのGoogleカレンダーで見られるようになりました。\n\n' +
+      '■ 見方\n' +
+      'Googleカレンダー（スマホアプリまたはPC）を開くと、カレンダー一覧に「FLHシフト（全体）」が追加されています。\n' +
+      '表示されない場合は、アプリを閉じて開き直すか、数分おいてからご確認ください。\n\n' +
+      '※ このカレンダーは閲覧専用です。シフト希望の提出・変更はいつものアプリから行ってください。\n' +
+      appUrl() + '\n';
+    MailApp.sendEmail(staff.email, subject, body);
+  } catch (e) {
+    log('system', 'mail_error', 'calendar_shared ' + staff.email);
+  }
 }
 
 /** シフト行とそれに紐づく本人・共有カレンダーイベントを削除 */

@@ -615,9 +615,27 @@ var Admin = (function () {
       '  <button class="btn-mini" onclick="Admin.mStaffAdd()">＋ スタッフを追加</button>' +
       '  <button class="btn btn-primary btn-block" onclick="Admin.saveStaff()">スタッフを保存</button>' +
       '</div>' +
+      '<div class="card"><h3>📅 共有カレンダー</h3>' +
+      '  <p class="muted">承認済みシフトが集約される「FLHシフト（全体）」カレンダーを、有効なスタッフ全員のGoogleカレンダーで見られるようにします（閲覧のみ）。新たに共有されたスタッフにはメールでお知らせします。<br>※ スタッフ保存時にも自動で共有されます。</p>' +
+      '  <button class="btn btn-primary btn-block" onclick="Admin.shareCalendar()">全スタッフに共有する</button>' +
+      '</div>' +
       '</div>' +
       App.tabbar('admin')
     );
+  }
+
+  async function shareCalendar() {
+    App.showLoading('共有カレンダーを共有中...');
+    try {
+      var r = await Api.call('adminSyncCalendarShare');
+      var msg = '新たに共有: ' + r.shared.length + '名';
+      if (r.already.length) msg += ' / 共有済み: ' + r.already.length + '名';
+      if (r.failed.length) msg += ' / 失敗: ' + r.failed.length + '名（' + r.failed.join('、') + '）';
+      App.toast(msg, r.failed.length ? 'error' : 'success');
+    } catch (e) {
+      App.toast(e.message, 'error');
+    }
+    drawMaster();
   }
 
   // マスタ編集ハンドラ
@@ -678,6 +696,7 @@ var Admin = (function () {
     resolveRequest: resolveRequest,
     exportCsv: exportCsv,
     refreshWages: refreshWages,
+    shareCalendar: shareCalendar,
     mLoc: mLoc, mLocAdd: mLocAdd, mLocDel: mLocDel,
     mPat: mPat, mPatAdd: mPatAdd, mPatDel: mPatDel,
     mStaff: mStaff, mStaffAdd: mStaffAdd, mStaffLoc: mStaffLoc,
