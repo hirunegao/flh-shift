@@ -619,9 +619,41 @@ var Admin = (function () {
       '  <p class="muted">承認済みシフトが集約される「FLHシフト（全体）」カレンダーを、有効なスタッフ全員のGoogleカレンダーで見られるようにします（閲覧のみ）。新たに共有されたスタッフにはメールでお知らせします。<br>※ スタッフ保存時にも自動で共有されます。</p>' +
       '  <button class="btn btn-primary btn-block" onclick="Admin.shareCalendar()">全スタッフに共有する</button>' +
       '</div>' +
+      '<div class="card"><h3>📣 締切リマインド（Slack）</h3>' +
+      '  <p class="muted">締切3日前と締切当日の朝10時に、未提出者の一覧をSlackへ自動送信します。「テスト送信」で今すぐSlackに届くか確認できます。</p>' +
+      '  <button class="btn btn-outline btn-block" onclick="Admin.testReminder()">Slackにテスト送信する</button>' +
+      '  <div id="reminder-status"></div>' +
+      '</div>' +
       '</div>' +
       App.tabbar('admin')
     );
+  }
+
+  async function testReminder() {
+    App.showLoading('Slackにテスト送信中...');
+    var r = null, err = null;
+    try {
+      r = await Api.call('adminTestReminder');
+    } catch (e) {
+      err = e;
+    }
+    drawMaster();
+    var el = document.getElementById('reminder-status');
+    if (err) {
+      App.toast(err.message, 'error');
+      return;
+    }
+    var html = r.slackSet
+      ? '<p class="muted">✅ テスト送信しました。Slackを確認してください。</p>'
+      : '<p class="muted">⚠️ SLACK_WEBHOOK_URL が未設定です（GASのスクリプトプロパティに設定してください）</p>';
+    html += '<p class="muted">自動送信トリガー: ' +
+      (r.triggers.indexOf('dailyReminder') >= 0
+        ? '✅ 登録済み（毎朝10時）'
+        : '⚠️ 未登録 — GASエディタで関数 setupTriggers を実行してください') +
+      (r.lastReminderAt ? '<br>最後の自動送信チェック: ' + esc(r.lastReminderAt) : '') +
+      '</p>';
+    if (el) el.innerHTML = html;
+    App.toast(r.sent ? 'Slackにテスト送信しました' : 'Slackが未設定です', r.sent ? 'success' : 'error');
   }
 
   async function shareCalendar() {
@@ -697,6 +729,7 @@ var Admin = (function () {
     exportCsv: exportCsv,
     refreshWages: refreshWages,
     shareCalendar: shareCalendar,
+    testReminder: testReminder,
     mLoc: mLoc, mLocAdd: mLocAdd, mLocDel: mLocDel,
     mPat: mPat, mPatAdd: mPatAdd, mPatDel: mPatDel,
     mStaff: mStaff, mStaffAdd: mStaffAdd, mStaffLoc: mStaffLoc,

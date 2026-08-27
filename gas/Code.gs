@@ -212,6 +212,8 @@ function route(req) {
       return apiAdminSaveStaff(staff, payload);
     case 'adminSyncCalendarShare':
       return apiAdminSyncCalendarShare(staff);
+    case 'adminTestReminder':
+      return apiAdminTestReminder(staff);
     case 'adminRunReminder':
       return dailyReminder();
   }
@@ -1030,12 +1032,55 @@ function dailyReminder() {
     if (pending.length === 0) return;
 
     var names = pending.map(function (s) { return s.name; }).join('、');
-    messages.push('⏰ ' + periodLabel(pk) + ' のシフト希望 締切まであと' + daysLeft + '日（' + dl.label + '締切）\n未提出: ' + names + '\n' + appUrl());
+    var isToday = Utilities.formatDate(dl.dateObj, TZ, 'yyyy-MM-dd') === Utilities.formatDate(now, TZ, 'yyyy-MM-dd');
+    var label = isToday ? '【本日締切】' : '締切まであと' + daysLeft + '日';
+    messages.push('⏰ ' + periodLabel(pk) + ' のシフト希望 ' + label + '（' + dl.label + '締切）\n未提出: ' + names + '\n' + appUrl());
   });
 
   messages.forEach(function (msg) { notifySlack(msg); });
   PropertiesService.getScriptProperties().setProperty('LAST_REMINDER_AT', nowStr());
   return { sent: messages.length };
+}
+
+/**
+ * リマインドのテスト送信（管理者専用）。
+ * 直近期間の未提出状況をSlackにテスト送信し、トリガー登録状態も返す。
+ */
+function apiAdminTestReminder(admin) {
+  var status = {
+    slackSet: !!props('SLACK_WEBHOOK_URL'),
+    sent: false,
+    triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }),
+    lastReminderAt: props('LAST_REMINDER_AT') || ''
+  };
+  if (!status.slackSet) return status;
+
+  var now = new Date();
+  var targets = upcomingPeriods(now);
+  var text;
+  if (targets.length === 0) {
+    text = '【テスト送信】現在、締切が近い（14日以内）期間はありません。';
+  } else {
+    var pk = targets[0];
+    var dl = deadlineFor(pk);
+    var daysLeft = Math.max(0, Math.ceil((dl.dateObj - now) / 86400000));
+    var staffList = readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; });
+    var subs = readAll('Submissions').filter(function (s) { return s.periodKey === pk; });
+    var done = {};
+    subs.forEach(function (s) {
+      if (s.status === 'submitted' || s.status === 'approved') done[s.staffEmail] = true;
+    });
+    var pending = staffList.filter(function (s) { return !done[s.email]; });
+    var isToday = Utilities.formatDate(dl.dateObj, TZ, 'yyyy-MM-dd') === Utilities.formatDate(now, TZ, 'yyyy-MM-dd');
+    var label = isToday ? '【本日締切】' : '締切まであと' + daysLeft + '日';
+    text = '【テスト送信】⏰ ' + periodLabel(pk) + ' のシフト希望 ' + label + '（' + dl.label + '締切）\n' +
+      (pending.length ? '未提出: ' + pending.map(function (s) { return s.name; }).join('、') : '全員提出済みです') +
+      '\n' + appUrl();
+  }
+  notifySlack(text);
+  log(admin.email, 'reminder_test', 'sent');
+  status.sent = true;
+  return status;
 }
 
 /** 現時点で提出受付中（締切がまだ先 or 数日以内）の期間キーを返す */
