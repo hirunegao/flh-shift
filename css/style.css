@@ -399,6 +399,8 @@ body {
   border: 1px solid var(--gray-200); border-radius: 12px;
   padding: 10px 12px; margin-bottom: 8px;
 }
+.template-row.clickable { cursor: pointer; }
+.template-row.clickable:active { background: var(--gray-100); }
 .template-info { flex: 1; min-width: 0; font-size: 14px; }
 .template-info small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .template-buttons { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
