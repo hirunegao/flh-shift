@@ -11,6 +11,7 @@
  *   NOTION_TOKEN        : Notion内部連携トークン（任意・管理画面の時給取得用）
  *   NOTION_STAFF_DB_ID  : Notion「スタッフ」DBのID（任意・未設定ならデフォルト値）
  *   NOTION_WAGE_DB_ID   : Notion「時給表」DBのID（任意・未設定ならデフォルト値）
+ *   SHIFT_EXPORT_KEY    : シフトエクスポート用の秘密キー（任意・未設定なら DIAG_SECRET を共用）
  *
  * 初回セットアップ: setup() を実行 → シートが自動作成される
  * トリガー: setupTriggers() を実行 → 毎朝10時リマインド＋深夜3時バックアップ
@@ -27,6 +28,7 @@ var SHEETS = {
   Patterns: ['id', 'name', 'startTime', 'endTime', 'locationId', 'active'],
   Shifts: ['id', 'staffEmail', 'periodKey', 'date', 'patternId', 'startTime', 'endTime', 'locationId', 'eventId', 'sharedEventId', 'updatedAt'],
   Submissions: ['id', 'staffEmail', 'periodKey', 'status', 'comment', 'late', 'submittedAt', 'approvedAt', 'approvedBy', 'rejectReason', 'updatedAt'],
+  SubmissionSnapshots: ['id', 'staffEmail', 'periodKey', 'snapshotJson', 'createdAt'],
   ChangeRequests: ['id', 'staffEmail', 'periodKey', 'reason', 'status', 'createdAt', 'resolvedAt', 'resolvedBy'],
   Templates: ['id', 'staffEmail', 'name', 'dataJson', 'updatedAt'],
   Settings: ['key', 'value'],
@@ -49,6 +51,13 @@ function doGet(e) {
     setupTriggers();
     log('system', 'bootstrap', 'DIAG_SECRET set + triggers registered');
     return jsonOut({ ok: true, data: { bootstrapped: true, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) } });
+  }
+  // シフトデータのエクスポート（想定人件費ダッシュボード連携）: ?shift_export=1&key=秘密キー
+  if (e && e.parameter && e.parameter.shift_export) {
+    if (!shiftExportAuthorized(e)) {
+      return jsonOut({ ok: false, error: 'forbidden' });
+    }
+    return jsonOut({ ok: true, data: exportShiftsForDashboard() });
   }
   // 診断エンドポイントは DIAG_SECRET 必須（未設定・不一致なら拒否）
   if (e && e.parameter && e.parameter.diag) {
@@ -110,6 +119,57 @@ function diagAuthorized(e) {
   var secret = props('DIAG_SECRET');
   if (!secret) return false;
   return !!(e.parameter && e.parameter.key && e.parameter.key === secret);
+}
+
+/** シフトエクスポート用GETは SHIFT_EXPORT_KEY（未設定なら DIAG_SECRET）と ?key= の一致で許可 */
+function shiftExportAuthorized(e) {
+  var key = e && e.parameter && e.parameter.key;
+  if (!key) return false;
+  var s1 = props('SHIFT_EXPORT_KEY');
+  if (s1 && key === s1) return true;
+  var s2 = props('DIAG_SECRET');
+  return !!(s2 && key === s2);
+}
+
+/**
+ * 想定人件費ダッシュボード連携用のシフトエクスポート。
+ * 全期間のシフトを提出ステータス付きで返す。日跨ぎは終了日を翌日に補正済み。
+ */
+function exportShiftsForDashboard() {
+  var staff = readAll('Staff');
+  var nameByEmail = {};
+  staff.forEach(function (s) { nameByEmail[String(s.email).toLowerCase()] = s.name; });
+
+  var statusByKey = {};
+  readAll('Submissions').forEach(function (s) {
+    statusByKey[String(s.staffEmail).toLowerCase() + '|' + s.periodKey] = s.status;
+  });
+
+  var shifts = readAll('Shifts').map(function (r) {
+    var email = String(r.staffEmail || '').toLowerCase();
+    var startTime = pad(r.startTime);
+    var endTime = pad(r.endTime);
+    var endDate = r.date;
+    if (endTime <= startTime) {
+      var d = new Date(r.date + 'T00:00:00+09:00');
+      d.setDate(d.getDate() + 1);
+      endDate = Utilities.formatDate(d, TZ, 'yyyy-MM-dd');
+    }
+    return {
+      id: r.id,
+      staff: nameByEmail[email] || email,
+      date: r.date,
+      start: r.date + 'T' + startTime + ':00+09:00',
+      end: endDate + 'T' + endTime + ':00+09:00',
+      status: statusByKey[email + '|' + r.periodKey] || 'none'
+    };
+  });
+
+  return {
+    exportedAt: nowStr(),
+    staff: staff.map(function (s) { return { name: s.name, active: String(s.active) !== 'false' }; }),
+    shifts: shifts
+  };
 }
 
 /** スクリプトプロパティ優先、なければコード埋め込みのデフォルトを使用 */
@@ -180,6 +240,8 @@ function route(req) {
         .map(function (t) { return { id: t.id, name: t.name, data: t.dataJson }; });
     case 'saveTemplate':
       return apiSaveTemplate(staff, payload);
+    case 'renameTemplate':
+      return apiRenameTemplate(staff, payload);
     case 'deleteTemplate':
       deleteRowsWhere('Templates', function (t) {
         return t.id === payload.id && t.staffEmail === staff.email;
@@ -192,6 +254,10 @@ function route(req) {
   switch (action) {
     case 'adminGetPeriod':
       return apiAdminGetPeriod(payload);
+    case 'adminGetMonthly':
+      return apiAdminGetMonthly(payload);
+    case 'adminGetTrends':
+      return apiAdminGetTrends();
     case 'adminApprove':
       return apiAdminApprove(staff, payload);
     case 'adminBulkApprove':
@@ -362,6 +428,8 @@ function apiSaveShifts(staff, payload, isSubmit) {
     upsertSubmission(sub);
 
     if (isSubmit) {
+      // 提出時点の内容をスナップショット保存（管理者修正との差分レポート用）
+      saveSubmissionSnapshot(staff.email, pk, rows);
       // 本人カレンダーに【未確定】で登録
       var calResult = syncPersonalCalendar(staff.email, pk, false);
       notifySlack('📝 *' + staff.name + '* さんが ' + periodLabel(pk) + ' のシフト希望を提出しました' + (late ? '（締切超過）' : ''));
@@ -374,6 +442,26 @@ function apiSaveShifts(staff, payload, isSubmit) {
     return { saved: rows.length, status: status };
   } finally {
     lock.releaseLock();
+  }
+}
+
+/** 提出時点のシフト内容をスナップショットとして保存（再提出時は更新） */
+function saveSubmissionSnapshot(email, pk, rows) {
+  var snapshot = rows.map(function (r) {
+    return { date: r.date, patternId: r.patternId, startTime: r.startTime, endTime: r.endTime, locationId: r.locationId };
+  });
+  var existing = readAll('SubmissionSnapshots').filter(function (s) {
+    return emailsEqual(s.staffEmail, email) && s.periodKey === pk;
+  })[0];
+  if (existing) {
+    existing.snapshotJson = JSON.stringify(snapshot);
+    existing.createdAt = nowStr();
+    updateRowById('SubmissionSnapshots', existing);
+  } else {
+    appendRows('SubmissionSnapshots', [{
+      id: uid(), staffEmail: email, periodKey: pk,
+      snapshotJson: JSON.stringify(snapshot), createdAt: nowStr()
+    }]);
   }
 }
 
@@ -404,9 +492,25 @@ function apiCreateChangeRequest(staff, payload) {
   return { requested: true };
 }
 
-/** テンプレート保存 payload: { name, data(曜日→枠リストのオブジェクト) } */
+/** テンプレート保存 payload: { name, data, id? }
+ *  data は { v: 2, slots: [枠...] }（1日分テンプレート）。
+ *  旧形式（曜日番号→枠リストのオブジェクト）もそのまま保存・返却する（フロント側で判別）。
+ *  id 指定時は本人の既存テンプレートを上書き更新する。 */
+
 function apiSaveTemplate(staff, payload) {
   if (!payload.name || !payload.data) throw new Error('invalid_request');
+  if (payload.id) {
+    var existing = readAll('Templates').filter(function (t) {
+      return t.id === payload.id && t.staffEmail === staff.email;
+    })[0];
+    if (!existing) throw new Error('not_found');
+    existing.name = String(payload.name).slice(0, 40);
+    existing.dataJson = JSON.stringify(payload.data);
+    existing.updatedAt = nowStr();
+    updateRowById('Templates', existing);
+    log(staff.email, 'template_update', payload.id);
+    return { id: existing.id, updated: true };
+  }
   var row = {
     id: uid(), staffEmail: staff.email,
     name: String(payload.name).slice(0, 40),
@@ -415,6 +519,20 @@ function apiSaveTemplate(staff, payload) {
   };
   appendRows('Templates', [row]);
   return { id: row.id };
+}
+
+/** テンプレート名変更 payload: { id, name }（本人のテンプレートのみ） */
+function apiRenameTemplate(staff, payload) {
+  if (!payload.id || !payload.name) throw new Error('invalid_request');
+  var existing = readAll('Templates').filter(function (t) {
+    return t.id === payload.id && t.staffEmail === staff.email;
+  })[0];
+  if (!existing) throw new Error('not_found');
+  existing.name = String(payload.name).slice(0, 40);
+  existing.updatedAt = nowStr();
+  updateRowById('Templates', existing);
+  log(staff.email, 'template_rename', payload.id);
+  return { renamed: true };
 }
 
 // ---------- 管理者API ----------
@@ -426,7 +544,53 @@ function apiAdminGetPeriod(payload) {
     shifts: readAll('Shifts').filter(function (r) { return r.periodKey === pk; }),
     staff: readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; }),
     changeRequests: readAll('ChangeRequests').filter(function (c) { return c.status === 'pending'; }),
+    snapshots: readAll('SubmissionSnapshots').filter(function (s) { return s.periodKey === pk; })
+      .map(function (s) { return { staffEmail: s.staffEmail, snapshotJson: s.snapshotJson }; }),
     deadline: deadlineFor(pk)
+  };
+}
+
+/** 月次レポート payload: { month: '2026-10' } → 前後半2期間のデータをまとめて返す */
+function apiAdminGetMonthly(payload) {
+  var m = String(payload.month || '').match(/^(\d{4})-(\d{2})$/);
+  if (!m) throw new Error('invalid_request');
+  var pks = [m[1] + '-' + m[2] + '-A', m[1] + '-' + m[2] + '-B'];
+  return {
+    periods: pks,
+    submissions: readAll('Submissions').filter(function (s) { return pks.indexOf(s.periodKey) >= 0; }),
+    shifts: readAll('Shifts').filter(function (r) { return pks.indexOf(r.periodKey) >= 0; }),
+    staff: readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; })
+  };
+}
+
+/** 現在の期間を含む直近 n 期間のキーを古い順で返す */
+function recentPeriodKeys(n) {
+  var now = new Date();
+  var curY = now.getFullYear(), curM = now.getMonth() + 1;
+  var curH = now.getDate() <= 15 ? 'A' : 'B';
+  var out = [];
+  for (var i = 0; i < n; i++) {
+    out.unshift(curY + '-' + pad2(curM) + '-' + curH);
+    if (curH === 'B') { curH = 'A'; }
+    else { curH = 'B'; curM--; if (curM === 0) { curM = 12; curY--; } }
+  }
+  return out;
+}
+
+/** 提出率・勤務傾向レポート: 直近6期間の提出状況とシフトを返す */
+function apiAdminGetTrends() {
+  var pks = recentPeriodKeys(6);
+  return {
+    periods: pks,
+    submissions: readAll('Submissions').filter(function (s) { return pks.indexOf(s.periodKey) >= 0; })
+      .map(function (s) {
+        return { staffEmail: s.staffEmail, periodKey: s.periodKey, status: s.status, submittedAt: s.submittedAt, late: s.late };
+      }),
+    shifts: readAll('Shifts').filter(function (r) { return pks.indexOf(r.periodKey) >= 0; })
+      .map(function (r) {
+        return { staffEmail: r.staffEmail, periodKey: r.periodKey, date: r.date, startTime: r.startTime, endTime: r.endTime };
+      }),
+    staff: readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; })
   };
 }
 
@@ -450,6 +614,10 @@ function apiAdminApprove(admin, payload) {
   warnCalendarSyncFailure(payload.staffEmail, payload.periodKey, personal, shared);
   var st = findStaff(payload.staffEmail);
   notifySlack('✅ *' + st.name + '* さんの ' + periodLabel(payload.periodKey) + ' のシフトが承認されました');
+  mailStaff(payload.staffEmail,
+    '[シフト] ' + periodLabel(payload.periodKey) + ' のシフトが承認されました',
+    st.name + ' さん\n\n' + periodLabel(payload.periodKey) + ' のシフト希望が承認されました。\n' +
+    'Googleカレンダーにも確定登録されています。\n\n確認: ' + appUrl());
   log(admin.email, 'approve', payload.staffEmail + ' ' + payload.periodKey);
   return { approved: true, personal: personal, shared: shared };
 }
@@ -508,6 +676,10 @@ function apiAdminReject(admin, payload) {
   }
   var st = findStaff(payload.staffEmail);
   notifySlack('↩️ *' + st.name + '* さんの ' + periodLabel(payload.periodKey) + ' が差し戻されました' + (payload.reason ? ':「' + payload.reason + '」' : ''));
+  mailStaff(payload.staffEmail,
+    '[シフト] ' + periodLabel(payload.periodKey) + ' のシフト希望が差し戻されました',
+    st.name + ' さん\n\n' + periodLabel(payload.periodKey) + ' のシフト希望が差し戻されました。\n' +
+    '理由: ' + (payload.reason || '（記載なし）') + '\n\n内容を修正して再提出してください: ' + appUrl());
   log(admin.email, 'reject', payload.staffEmail + ' ' + payload.periodKey);
   return { rejected: true };
 }
@@ -1011,16 +1183,24 @@ function periodLabel(periodKey) {
 
 // ==================== リマインダー（時間主導トリガー） ====================
 
-/** setupTriggers() で毎朝10時に登録される */
+/** 締切日までの暦日数（JST基準。当日=0、前日=1） */
+function daysUntilDeadline(dateObj, now) {
+  var d1 = Utilities.formatDate(dateObj, TZ, 'yyyy-MM-dd');
+  var d2 = Utilities.formatDate(now, TZ, 'yyyy-MM-dd');
+  return Math.round((new Date(d1 + 'T00:00:00+09:00') - new Date(d2 + 'T00:00:00+09:00')) / 86400000);
+}
+
+/** setupTriggers() で毎朝10時に登録される。3日前・前日・当日に送信 */
 function dailyReminder() {
   var now = new Date();
   var targets = upcomingPeriods(now); // 提出対象となる直近の期間
   var messages = [];
+  var mailed = 0;
 
   targets.forEach(function (pk) {
     var dl = deadlineFor(pk);
-    var daysLeft = Math.ceil((dl.dateObj - now) / 86400000);
-    if (daysLeft !== 3 && daysLeft !== 1) return;
+    var daysLeft = daysUntilDeadline(dl.dateObj, now);
+    if ([3, 1, 0].indexOf(daysLeft) < 0) return; // 3日前・前日・当日
 
     var staffList = readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; });
     var subs = readAll('Submissions').filter(function (s) { return s.periodKey === pk; });
@@ -1032,14 +1212,22 @@ function dailyReminder() {
     if (pending.length === 0) return;
 
     var names = pending.map(function (s) { return s.name; }).join('、');
-    var isToday = Utilities.formatDate(dl.dateObj, TZ, 'yyyy-MM-dd') === Utilities.formatDate(now, TZ, 'yyyy-MM-dd');
-    var label = isToday ? '【本日締切】' : '締切まであと' + daysLeft + '日';
+    var label = daysLeft === 0 ? '【本日締切】' : '締切まであと' + daysLeft + '日';
     messages.push('⏰ ' + periodLabel(pk) + ' のシフト希望 ' + label + '（' + dl.label + '締切）\n未提出: ' + names + '\n' + appUrl());
+
+    // 未提出者本人へ個別リマインドメール
+    pending.forEach(function (s) {
+      mailStaff(s.email,
+        '[シフト] ' + periodLabel(pk) + ' の希望提出 ' + label,
+        s.name + ' さん\n\n' + periodLabel(pk) + ' のシフト希望がまだ提出されていません。\n' +
+        '締切: ' + dl.label + '\n\n提出はこちら: ' + appUrl());
+      mailed++;
+    });
   });
 
   messages.forEach(function (msg) { notifySlack(msg); });
   PropertiesService.getScriptProperties().setProperty('LAST_REMINDER_AT', nowStr());
-  return { sent: messages.length };
+  return { sent: messages.length, staffMailed: mailed };
 }
 
 /**
@@ -1063,7 +1251,7 @@ function apiAdminTestReminder(admin) {
   } else {
     var pk = targets[0];
     var dl = deadlineFor(pk);
-    var daysLeft = Math.max(0, Math.ceil((dl.dateObj - now) / 86400000));
+    var daysLeft = Math.max(0, daysUntilDeadline(dl.dateObj, now));
     var staffList = readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; });
     var subs = readAll('Submissions').filter(function (s) { return s.periodKey === pk; });
     var done = {};
@@ -1181,6 +1369,15 @@ function mailAdmins(subject, body) {
     });
   } catch (e) {
     log('system', 'mail_error', String(e));
+  }
+}
+
+/** スタッフ個人へのメール送信（失敗しても処理は続行） */
+function mailStaff(email, subject, body) {
+  try {
+    MailApp.sendEmail(email, subject, body);
+  } catch (e) {
+    log('system', 'mail_error', email + ' ' + String(e));
   }
 }
 

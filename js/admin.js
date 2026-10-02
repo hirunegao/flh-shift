@@ -64,6 +64,7 @@ var Admin = (function () {
       { id: 'approve', label: '承認' },
       { id: 'grid', label: 'グリッド' },
       { id: 'calendar', label: 'カレンダー' },
+      { id: 'report', label: 'レポート' },
       { id: 'requests', label: 'リクエスト' + (pendingCR ? ' <span class="badge">' + pendingCR + '</span>' : '') },
       { id: 'master', label: 'マスタ' }
     ];
@@ -75,6 +76,7 @@ var Admin = (function () {
     switch (current.tab) {
       case 'grid': body = gridView(); break;
       case 'calendar': body = calendarView(); break;
+      case 'report': body = reportView(); break;
       case 'requests': body = requestsView(); break;
       default: body = approveView();
     }
@@ -92,6 +94,11 @@ var Admin = (function () {
 
   function switchTab(tab) {
     current.tab = tab;
+    // レポートタブに戻ってきたとき、エラー状態なら再読込させる
+    if (tab === 'report') {
+      if (reportState.monthly && reportState.monthly.error) reportState.monthly = null;
+      if (reportState.trends && reportState.trends.error) reportState.trends = null;
+    }
     nav(tab);
   }
 
@@ -147,6 +154,7 @@ var Admin = (function () {
         '<div class="muted">' + (shiftCount[st.email] || 0) + '件の希望' +
         (sub && sub.submittedAt ? ' ・ 提出 ' + esc(sub.submittedAt).slice(5, 16) : '') + '</div>' +
         hoursLine +
+        workloadWarnHtml(st.email) +
         (sub && sub.comment ? '<div class="comment-box">💬 ' + esc(sub.comment) + '</div>' : '') +
         '<div class="approve-buttons">' + buttons + '</div>' +
         '</div>';
@@ -247,6 +255,40 @@ var Admin = (function () {
   function nameOf(email) {
     var st = current.data.staff.filter(function (s) { return s.email === email; })[0];
     return st ? st.name : email;
+  }
+
+  // ---------- 勤務負荷の警告 ----------
+
+  var WARN_CONSECUTIVE_DAYS = 6; // この日数以上の連続勤務で警告
+  var WARN_DAY_HOURS = 8;        // 1日の実働がこの時間を超えたら警告
+
+  /** スタッフの勤務負荷: { consecutive: 期間内の最大連続勤務日数, longDays: 長時間勤務の日数 } */
+  function workloadOf(email) {
+    var hoursByDate = {};
+    current.data.shifts.forEach(function (s) {
+      if (s.staffEmail !== email) return;
+      hoursByDate[s.date] = (hoursByDate[s.date] || 0) + shiftHours(s);
+    });
+    var maxConsec = 0, run = 0, longDays = 0;
+    App.periodDates(current.pk).forEach(function (d) {
+      var h = hoursByDate[d] || 0;
+      if (h > 0) { run++; if (run > maxConsec) maxConsec = run; } else { run = 0; }
+      if (h > WARN_DAY_HOURS) longDays++;
+    });
+    return { consecutive: maxConsec, longDays: longDays };
+  }
+
+  /** 勤務負荷の警告チップ（閾値未満なら空文字） */
+  function workloadWarnHtml(email) {
+    var w = workloadOf(email);
+    var chips = [];
+    if (w.consecutive >= WARN_CONSECUTIVE_DAYS) {
+      chips.push('<span class="chip chip-orange">⚠ 連続' + w.consecutive + '日勤務</span>');
+    }
+    if (w.longDays > 0) {
+      chips.push('<span class="chip chip-orange">⚠ ' + WARN_DAY_HOURS + 'h超 ' + w.longDays + '日</span>');
+    }
+    return chips.length > 0 ? '<div class="workload-warn">' + chips.join(' ') + '</div>' : '';
   }
 
   // ---------- 実働時間・時給 ----------
@@ -374,7 +416,7 @@ var Admin = (function () {
       var totalLine = hrs > 0
         ? '<br><span class="grid-total">' + fmtH(hrs) + (wage == null ? '' : ' ' + fmtYen(hrs * wage)) + '</span>'
         : '';
-      return '<tr><th class="grid-name">' + esc(st.name) + '<br>' + App.statusChip(status) + totalLine + '</th>' + tds + '</tr>';
+      return '<tr><th class="grid-name">' + esc(st.name) + '<br>' + App.statusChip(status) + totalLine + workloadWarnHtml(st.email) + '</th>' + tds + '</tr>';
     }).join('');
 
     // 日毎人数集計
@@ -448,6 +490,195 @@ var Admin = (function () {
     return '<div class="cal-legend"><span class="cal-item approved">承認済み</span><span class="cal-item">未承認</span></div>' +
       '<div class="cal-week">' + ['日', '月', '火', '水', '木', '金', '土'].map(function (w) { return '<div>' + w + '</div>'; }).join('') + '</div>' +
       '<div class="cal-grid">' + cells.join('') + '</div>';
+  }
+
+  // ---------- レポートタブ ----------
+
+  var reportState = { month: null, monthly: null, trends: null, loading: false };
+
+  function setReportMonth(month) {
+    reportState.month = month;
+    reportState.monthly = null;
+    draw();
+  }
+
+  async function ensureReportData() {
+    if (reportState.loading) return;
+    var month = reportState.month || current.pk.slice(0, 7);
+    var needMonthly = !reportState.monthly || reportState.monthly.month !== month;
+    var needTrends = !reportState.trends;
+    if (!needMonthly && !needTrends) return;
+    reportState.loading = true;
+    try {
+      if (needMonthly) {
+        var res = await Api.call('adminGetMonthly', { month: month });
+        reportState.monthly = { month: month, data: res };
+      }
+      if (needTrends) {
+        reportState.trends = await Api.call('adminGetTrends', {});
+      }
+    } catch (e) {
+      App.toast(e.message, 'error');
+      // 自動再試行ループを防ぐためエラー状態を保持（再読込はタブ切替で）
+      if (needMonthly) reportState.monthly = { month: month, data: null, error: true };
+      if (needTrends) reportState.trends = { error: true };
+    }
+    reportState.loading = false;
+    if (current.tab === 'report') draw();
+  }
+
+  function reportView() {
+    ensureReportData();
+    return monthlyReportHtml() + trendsReportHtml() + diffReportHtml();
+  }
+
+  /** 月次集計: 前後半を合算したスタッフ別の時間・予測人件費 */
+  function monthlyReportHtml() {
+    var month = reportState.month || current.pk.slice(0, 7);
+    var base = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1, 1);
+    var opts = [];
+    for (var i = -3; i <= 1; i++) {
+      var d = new Date(base.getFullYear(), base.getMonth() + i, 1);
+      var mv = d.getFullYear() + '-' + App.pad2(d.getMonth() + 1);
+      opts.push('<option value="' + mv + '"' + (mv === month ? ' selected' : '') + '>' +
+        d.getFullYear() + '年' + (d.getMonth() + 1) + '月</option>');
+    }
+    var body;
+    if (!reportState.monthly) {
+      body = '<p class="muted">読み込み中...</p>';
+    } else if (reportState.monthly.error || !reportState.monthly.data) {
+      body = '<p class="muted">読み込みに失敗しました。タブを切り替えると再試行します。</p>';
+    } else {
+      var data = reportState.monthly.data;
+      var pkA = data.periods[0], pkB = data.periods[1];
+      var sumA = 0, sumB = 0, sumCost = 0;
+      var rows = data.staff.map(function (st) {
+        var hA = 0, hB = 0;
+        data.shifts.forEach(function (s) {
+          if (s.staffEmail !== st.email) return;
+          if (s.periodKey === pkA) hA += shiftHours(s);
+          else if (s.periodKey === pkB) hB += shiftHours(s);
+        });
+        var total = hA + hB;
+        var wage = wageOf(st.name);
+        var cost = wage == null ? null : total * wage;
+        sumA += hA; sumB += hB;
+        if (cost != null) sumCost += cost;
+        return '<tr>' +
+          '<td>' + esc(st.name) + '</td>' +
+          '<td class="num">' + (hA > 0 ? fmtH(hA) : '—') + '</td>' +
+          '<td class="num">' + (hB > 0 ? fmtH(hB) : '—') + '</td>' +
+          '<td class="num"><b>' + (total > 0 ? fmtH(total) : '—') + '</b></td>' +
+          '<td class="num">' + (cost != null && total > 0 ? fmtYen(cost) : '—') + '</td>' +
+          '</tr>';
+      }).join('');
+      body = '<table class="summary-table report-table"><thead><tr>' +
+        '<th>スタッフ</th><th>前半</th><th>後半</th><th>月合計</th><th>予測人件費</th>' +
+        '</tr></thead><tbody>' + rows +
+        '<tr class="summary-total-row"><td>合計</td><td class="num">' + fmtH(sumA) + '</td><td class="num">' + fmtH(sumB) + '</td>' +
+        '<td class="num">' + fmtH(sumA + sumB) + '</td><td class="num">' + fmtYen(sumCost) + '</td></tr>' +
+        '</tbody></table>' +
+        '<p class="muted">※ 全ステータスの希望を集計（時給未設定のスタッフは人件費に含まれません）</p>';
+    }
+    return '<div class="card"><h3>📊 月次集計</h3>' +
+      '<select class="report-month-select" onchange="Admin.setReportMonth(this.value)">' + opts.join('') + '</select>' +
+      body + '</div>';
+  }
+
+  /** 提出率・勤務傾向: 直近6期間の提出率バーと期間ごとの時間バー */
+  function trendsReportHtml() {
+    var inner;
+    if (!reportState.trends) {
+      inner = '<p class="muted">読み込み中...</p>';
+    } else if (reportState.trends.error) {
+      inner = '<p class="muted">読み込みに失敗しました。タブを切り替えると再試行します。</p>';
+    } else {
+      var t = reportState.trends;
+      var rows = t.staff.map(function (st) {
+        var submitted = 0;
+        var hoursByPeriod = t.periods.map(function () { return 0; });
+        t.submissions.forEach(function (s) {
+          if (s.staffEmail === st.email && (s.status === 'submitted' || s.status === 'approved')) submitted++;
+        });
+        t.shifts.forEach(function (s) {
+          if (s.staffEmail !== st.email) return;
+          var idx = t.periods.indexOf(s.periodKey);
+          if (idx >= 0) hoursByPeriod[idx] += shiftHours(s);
+        });
+        var rate = Math.round(submitted / t.periods.length * 100);
+        var maxH = Math.max.apply(null, hoursByPeriod.concat([1]));
+        var bars = hoursByPeriod.map(function (h, i) {
+          var px = Math.max(2, Math.round(h / maxH * 28));
+          return '<span class="trend-bar" style="height:' + px + 'px" title="' + esc(t.periods[i]) + ': ' + fmtH(h) + '"></span>';
+        }).join('');
+        return '<tr>' +
+          '<td>' + esc(st.name) + '</td>' +
+          '<td class="report-rate"><div class="rate-bar-wrap"><div class="rate-bar" style="width:' + rate + '%"></div></div>' +
+          '<span class="muted"> ' + rate + '%（' + submitted + '/' + t.periods.length + '）</span></td>' +
+          '<td><span class="trend-bars">' + bars + '</span></td>' +
+          '</tr>';
+      }).join('');
+      inner = '<table class="summary-table report-table"><thead><tr>' +
+        '<th>スタッフ</th><th>提出率</th><th>期間ごとの実働（古→新）</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+    return '<div class="card"><h3>📈 提出率・勤務傾向（直近6期間）</h3>' + inner + '</div>';
+  }
+
+  /** 修正差分: 提出時点のスナップショットと現在のシフトを比較 */
+  function diffReportHtml() {
+    var snaps = current.data.snapshots || [];
+    var inner;
+    if (snaps.length === 0) {
+      inner = '<p class="muted">この期間のスナップショットはまだありません（今後の提出から自動記録されます）。</p>';
+    } else {
+      var rows = [];
+      snaps.forEach(function (sn) {
+        var before;
+        try { before = JSON.parse(sn.snapshotJson); } catch (e) { return; }
+        var beforeByDate = {};
+        (before || []).forEach(function (s) {
+          if (!beforeByDate[s.date]) beforeByDate[s.date] = [];
+          beforeByDate[s.date].push(s);
+        });
+        var afterByDate = {};
+        current.data.shifts.forEach(function (s) {
+          if (s.staffEmail !== sn.staffEmail) return;
+          if (!afterByDate[s.date]) afterByDate[s.date] = [];
+          afterByDate[s.date].push(s);
+        });
+        var dates = {};
+        Object.keys(beforeByDate).forEach(function (d) { dates[d] = true; });
+        Object.keys(afterByDate).forEach(function (d) { dates[d] = true; });
+        var changes = Object.keys(dates).sort().map(function (d) {
+          var b = normEntries(beforeByDate[d]);
+          var a = normEntries(afterByDate[d]);
+          if (b === a) return null;
+          return '<tr><td>' + esc(App.dateLabel(d)) + '</td>' +
+            '<td>' + esc(entriesLabel(beforeByDate[d])) + '</td>' +
+            '<td>' + esc(entriesLabel(afterByDate[d])) + '</td></tr>';
+        }).filter(Boolean);
+        if (changes.length > 0) {
+          rows.push('<tr class="report-diff-staff"><td colspan="3"><b>' + esc(nameOf(sn.staffEmail)) + '</b>（' + changes.length + '日変更）</td></tr>');
+          rows = rows.concat(changes);
+        }
+      });
+      inner = rows.length === 0
+        ? '<p class="muted">提出時点からの変更はありません。</p>'
+        : '<table class="summary-table report-table"><thead><tr><th>日付</th><th>提出時</th><th>現在</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>';
+    }
+    return '<div class="card"><h3>📝 修正差分（' + esc(App.periodLabelShort(current.pk)) + '）</h3>' + inner + '</div>';
+  }
+
+  function normEntries(list) {
+    return (list || []).map(function (s) {
+      return s.startTime + '-' + s.endTime + '-' + (s.locationId || '');
+    }).sort().join('|');
+  }
+
+  function entriesLabel(list) {
+    if (!list || list.length === 0) return '休';
+    return list.map(function (s) { return s.startTime + '〜' + s.endTime; }).join('+');
   }
 
   // ---------- 変更リクエストタブ ----------
@@ -728,6 +959,7 @@ var Admin = (function () {
     resolveRequest: resolveRequest,
     exportCsv: exportCsv,
     refreshWages: refreshWages,
+    setReportMonth: setReportMonth,
     shareCalendar: shareCalendar,
     testReminder: testReminder,
     mLoc: mLoc, mLocAdd: mLocAdd, mLocDel: mLocDel,

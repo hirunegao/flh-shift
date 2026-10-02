@@ -219,8 +219,9 @@ body {
   padding: 6px 14px; font-size: 13px; font-weight: 700; cursor: pointer; color: var(--gray-900);
 }
 .pattern-chip small { font-size: 10px; font-weight: 400; color: var(--gray-400); }
-.pattern-chip.selected { border-color: var(--accent); background: var(--accent-light); color: var(--accent-dark); }
-.pattern-chip.chip-off.selected { border-color: var(--orange); background: var(--orange-light); color: var(--orange); }
+.pattern-chip.selected { border-color: var(--accent); background: var(--accent-light); color: var(--accent-dark); box-shadow: 0 0 0 2px var(--accent); }
+.pattern-chip.chip-off.selected { border-color: var(--orange); background: var(--orange-light); color: var(--orange); box-shadow: 0 0 0 2px var(--orange); }
+.chip-hint-active { color: var(--accent-dark); font-weight: 700; font-size: 11px; }
 .quick-actions { display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 4px; }
 .quick-actions .btn-mini { flex-shrink: 0; }
 
@@ -399,11 +400,23 @@ body {
   border: 1px solid var(--gray-200); border-radius: 12px;
   padding: 10px 12px; margin-bottom: 8px;
 }
+.workload-warn { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+/* レポート */
+.report-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.report-month-select { margin: 6px 0 2px; padding: 6px 10px; border: 1px solid var(--gray-200); border-radius: 8px; font-size: 14px; }
+.report-rate { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.rate-bar-wrap { background: var(--gray-100); border-radius: 6px; height: 10px; overflow: hidden; min-width: 70px; width: 90px; }
+.rate-bar { background: var(--green); height: 100%; }
+.trend-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 30px; }
+.trend-bar { width: 10px; background: var(--accent); border-radius: 2px 2px 0 0; display: inline-block; }
+.report-diff-staff td { background: var(--gray-100); }
+.grid-name .workload-warn { justify-content: flex-start; }
+.grid-name .workload-warn .chip { font-size: 10px; padding: 1px 6px; }
 .template-row.clickable { cursor: pointer; }
 .template-row.clickable:active { background: var(--gray-100); }
 .template-info { flex: 1; min-width: 0; font-size: 14px; }
 .template-info small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.template-buttons { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.template-buttons { display: flex; gap: 6px; align-items: center; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; max-width: 46%; }
 
 /* デスクトップ調整 */
 @media (min-width: 700px) {

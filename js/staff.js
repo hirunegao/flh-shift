@@ -292,8 +292,21 @@ var Staff = (function () {
     var chipBar = '';
     if (!editor.locked) {
       var selCount = Object.keys(editor.selectedDays).length;
+      // 選択中チップのヒント（連続入力できることを明示）
+      var hintHtml;
+      if (editor.selectedChip) {
+        var chipLabel = editor.selectedChip === 'off'
+          ? '休み（クリア）'
+          : (function () {
+              var sp = patterns.filter(function (x) { return x.id === editor.selectedChip; })[0];
+              return sp ? sp.name + ' ' + sp.startTime + '〜' + sp.endTime : '';
+            })();
+        hintHtml = '<div class="chip-bar-hint chip-hint-active">👉 「' + esc(chipLabel) + '」選択中 — 日付をタップで連続入力できます（解除: チップをもう一度タップ）</div>';
+      } else {
+        hintHtml = '<div class="chip-bar-hint">パターンを選んで日付をタップ／チェックを付けて一括適用</div>';
+      }
       chipBar = '<div class="chip-bar">' +
-        '<div class="chip-bar-hint">パターンを選んで日付をタップ／チェックを付けて一括適用</div>' +
+        hintHtml +
         '<div class="chip-bar-scroll">' +
         patterns.map(function (p) {
           return '<button class="pattern-chip' + (editor.selectedChip === p.id ? ' selected' : '') + '" ' +
@@ -505,6 +518,8 @@ var Staff = (function () {
           '<br><small class="muted">' + esc(summary) + '</small></div>' +
           '<div class="template-buttons">' +
           '  <button class="btn btn-primary btn-sm" onclick="Staff.applyTemplate(\'' + t.id + '\')">' + esc(applyLabel) + '</button>' +
+          '  <button class="btn-mini" onclick="Staff.overwriteTemplate(\'' + t.id + '\')">上書き</button>' +
+          '  <button class="btn-mini" onclick="Staff.renameTemplate(\'' + t.id + '\')">名前</button>' +
           '  <button class="btn-mini danger" onclick="Staff.deleteTemplate(\'' + t.id + '\')">削除</button>' +
           '</div></div>';
       }).join('');
@@ -526,8 +541,26 @@ var Staff = (function () {
       '</div>';
   }
 
+  /** 日付ピッカーの遷移先: { mode: 'create' } | { mode: 'overwrite', id, name } */
+  var templatePicker = null;
+
   /** テンプレート作成: 元にする1日を選び、その日の内容を保存する */
   async function saveTemplateFromCurrent() {
+    templatePicker = { mode: 'create' };
+    await pickTemplateDayFlow();
+  }
+
+  /** 既存テンプレートの内容を、選んだ1日の内容で上書きする */
+  async function overwriteTemplate(id) {
+    var templates = await loadTemplates();
+    var t = templates.filter(function (x) { return x.id === id; })[0];
+    if (!t) return;
+    templatePicker = { mode: 'overwrite', id: t.id, name: t.name };
+    await pickTemplateDayFlow();
+  }
+
+  /** 作成/上書き共通: チェックが1日ならその日を使い、それ以外は日付ピッカーを表示 */
+  async function pickTemplateDayFlow() {
     // 入力がある日付の一覧
     var filledDates = App.periodDates(editor.pk).filter(function (d) {
       return (editor.entries[d] || []).length > 0;
@@ -541,19 +574,22 @@ var Staff = (function () {
       return filledDates.indexOf(d) >= 0;
     });
     if (sel.length === 1) {
-      await saveTemplateFromDate(sel[0]);
+      await pickTemplateDate(sel[0]);
       return;
     }
     // 元にする日を選ぶピッカーを表示
+    var isOverwrite = templatePicker.mode === 'overwrite';
     var c = document.getElementById('modal-container');
     c.innerHTML =
       '<div class="sheet-overlay" onclick="if(event.target===this)App.closeSheet()">' +
       '  <div class="sheet">' +
       '    <div class="sheet-handle"></div>' +
       '    <h3>元にする日を選択</h3>' +
-      '    <p class="muted">選んだ日の内容が1日分のテンプレートとして保存されます。</p>' +
+      (isOverwrite
+        ? '    <p class="muted">テンプレート「' + esc(templatePicker.name) + '」の内容を、選んだ日の内容で上書きします。</p>'
+        : '    <p class="muted">選んだ日の内容が1日分のテンプレートとして保存されます。</p>') +
       filledDates.map(function (d) {
-        return '<div class="template-row clickable" onclick="Staff.saveTemplateFromDate(\'' + d + '\')">' +
+        return '<div class="template-row clickable" onclick="Staff.pickTemplateDate(\'' + d + '\')">' +
           '<div class="template-info"><b>' + App.dateLabel(d) + '</b><br>' +
           '<small class="muted">' + esc(slotSummary(editor.entries[d])) + '</small></div>' +
           '</div>';
@@ -563,6 +599,18 @@ var Staff = (function () {
       '    </div>' +
       '  </div>' +
       '</div>';
+  }
+
+  /** 日付ピッカーで日が選ばれたときの振り分け */
+  async function pickTemplateDate(date) {
+    if (!templatePicker) return;
+    var p = templatePicker;
+    templatePicker = null;
+    if (p.mode === 'overwrite') {
+      await overwriteTemplateFromDate(p.id, p.name, date);
+    } else {
+      await saveTemplateFromDate(date);
+    }
   }
 
   /** 指定した日の内容を1日分のテンプレートとして保存 */
@@ -586,6 +634,55 @@ var Staff = (function () {
       await Api.call('saveTemplate', { name: name, data: { v: 2, slots: list } });
       editor.templates = null; // 再読込させる
       App.toast('テンプレート「' + name + '」を保存しました', 'success');
+      openTemplateSheet();
+    } catch (e) {
+      App.toast(e.message, 'error');
+    }
+  }
+
+  /** 指定した日の内容で既存テンプレートを上書き保存 */
+  async function overwriteTemplateFromDate(id, name, date) {
+    var list = (editor.entries[date] || []).map(function (en) {
+      return { patternId: en.patternId, startTime: en.startTime, endTime: en.endTime, locationId: en.locationId };
+    });
+    if (list.length === 0) {
+      App.toast('その日は入力がありません', 'error');
+      return;
+    }
+    App.closeSheet();
+    var yes = await App.confirmModal(
+      'テンプレートの上書き',
+      '<p>テンプレート「' + esc(name) + '」の内容を<br>' + App.dateLabel(date) + ' の内容（' + esc(slotSummary(list)) + '）で上書きしますか？</p>',
+      '上書きする'
+    );
+    if (!yes) return;
+    try {
+      await Api.call('saveTemplate', { id: id, name: name, data: { v: 2, slots: list } });
+      editor.templates = null;
+      App.toast('テンプレート「' + name + '」を上書きしました', 'success');
+      openTemplateSheet();
+    } catch (e) {
+      App.toast(e.message, 'error');
+    }
+  }
+
+  /** テンプレート名の変更 */
+  async function renameTemplate(id) {
+    var templates = await loadTemplates();
+    var t = templates.filter(function (x) { return x.id === id; })[0];
+    if (!t) return;
+    App.closeSheet();
+    var name = await App.promptModal(
+      'テンプレート名の変更',
+      '<p>現在の名前: <b>' + esc(t.name) + '</b></p>',
+      t.name, '変更する'
+    );
+    if (!name) return;
+    if (name === t.name) { openTemplateSheet(); return; }
+    try {
+      await Api.call('renameTemplate', { id: id, name: name });
+      editor.templates = null;
+      App.toast('名前を「' + name + '」に変更しました', 'success');
       openTemplateSheet();
     } catch (e) {
       App.toast(e.message, 'error');
@@ -1022,6 +1119,9 @@ var Staff = (function () {
     openTemplateSheet: openTemplateSheet,
     saveTemplateFromCurrent: saveTemplateFromCurrent,
     saveTemplateFromDate: saveTemplateFromDate,
+    pickTemplateDate: pickTemplateDate,
+    overwriteTemplate: overwriteTemplate,
+    renameTemplate: renameTemplate,
     applyTemplate: applyTemplate,
     deleteTemplate: deleteTemplate,
     copyPrevious: copyPrevious,
