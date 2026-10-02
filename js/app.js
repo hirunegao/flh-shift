@@ -268,6 +268,17 @@ var App = (function () {
     return now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-' + half;
   }
 
+  /** 提出受付中の期間（これから開始する最も近い期間）。管理画面のデフォルト表示用 */
+  function collectingPeriodKey() {
+    var now = new Date();
+    var list = selectablePeriods();
+    for (var i = 0; i < list.length; i++) {
+      var dates = periodDates(list[i]);
+      if (new Date(dates[0] + 'T00:00:00') > now) return list[i];
+    }
+    return currentPeriodKey();
+  }
+
   // ---------- 表示ユーティリティ ----------
 
   var WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
@@ -417,7 +428,7 @@ var App = (function () {
     // 期間
     parsePeriod: parsePeriod, periodLabel: periodLabel, periodLabelShort: periodLabelShort,
     periodDates: periodDates, deadlineFor: deadlineFor, selectablePeriods: selectablePeriods,
-    shiftPeriod: shiftPeriod, currentPeriodKey: currentPeriodKey,
+    shiftPeriod: shiftPeriod, currentPeriodKey: currentPeriodKey, collectingPeriodKey: collectingPeriodKey,
     // 表示
     dateLabel: dateLabel, weekdayClass: weekdayClass, esc: esc, pad2: pad2,
     fmtDeadline: fmtDeadline, statusChip: statusChip, STATUS_INFO: STATUS_INFO,

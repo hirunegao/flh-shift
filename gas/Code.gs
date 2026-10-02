@@ -429,7 +429,12 @@ function apiSaveShifts(staff, payload, isSubmit) {
 
     if (isSubmit) {
       // 提出時点の内容をスナップショット保存（管理者修正との差分レポート用）
-      saveSubmissionSnapshot(staff.email, pk, rows);
+      // ※補助データなので失敗しても提出自体は成功とする
+      try {
+        saveSubmissionSnapshot(staff.email, pk, rows);
+      } catch (e) {
+        log(staff.email, 'snapshot_error', pk + ' ' + String(e));
+      }
       // 本人カレンダーに【未確定】で登録
       var calResult = syncPersonalCalendar(staff.email, pk, false);
       notifySlack('📝 *' + staff.name + '* さんが ' + periodLabel(pk) + ' のシフト希望を提出しました' + (late ? '（締切超過）' : ''));
@@ -539,13 +544,20 @@ function apiRenameTemplate(staff, payload) {
 
 function apiAdminGetPeriod(payload) {
   var pk = payload.periodKey;
+  // スナップショットは補助データ（差分レポート用）なので、読み込みに失敗しても画面全体は返す
+  var snapshots = [];
+  try {
+    snapshots = readAll('SubmissionSnapshots').filter(function (s) { return s.periodKey === pk; })
+      .map(function (s) { return { staffEmail: s.staffEmail, snapshotJson: s.snapshotJson }; });
+  } catch (e) {
+    log('system', 'snapshot_read_error', pk + ' ' + String(e));
+  }
   return {
     submissions: readAll('Submissions').filter(function (s) { return s.periodKey === pk; }),
     shifts: readAll('Shifts').filter(function (r) { return r.periodKey === pk; }),
     staff: readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; }),
     changeRequests: readAll('ChangeRequests').filter(function (c) { return c.status === 'pending'; }),
-    snapshots: readAll('SubmissionSnapshots').filter(function (s) { return s.periodKey === pk; })
-      .map(function (s) { return { staffEmail: s.staffEmail, snapshotJson: s.snapshotJson }; }),
+    snapshots: snapshots,
     deadline: deadlineFor(pk)
   };
 }

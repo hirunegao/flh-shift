@@ -11,7 +11,8 @@ var Admin = (function () {
   async function render(params) {
     // #/admin/:tab?/:pk?
     current.tab = (params && params[0]) || current.tab || 'approve';
-    current.pk = (params && params[1] && decodeURIComponent(params[1])) || current.pk || App.currentPeriodKey();
+    // デフォルトは提出受付中の期間（これから開始する期間）。カレンダー上の現在期間ではない点に注意
+    current.pk = (params && params[1] && decodeURIComponent(params[1])) || current.pk || App.collectingPeriodKey();
 
     if (current.tab === 'master') {
       renderMaster();
