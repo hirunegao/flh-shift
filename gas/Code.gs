@@ -70,6 +70,18 @@ function doGet(e) {
       return jsonOut({ ok: false, error: 'invalid_request' });
     }
   }
+  // 本人カレンダーへ既存シフトを再配信: ?resync_personal=1&key=秘密キー
+  if (e && e.parameter && e.parameter.resync_personal) {
+    if (!portalShiftAuthorized(e)) {
+      return jsonOut({ ok: false, error: 'forbidden' });
+    }
+    try {
+      return jsonOut({ ok: true, data: resyncPersonalCalendars() });
+    } catch (err) {
+      log('system', 'resync_personal_error', String(err));
+      return jsonOut({ ok: false, error: 'server_error' });
+    }
+  }
   // 診断エンドポイントは DIAG_SECRET 必須（未設定・不一致なら拒否）
   if (e && e.parameter && e.parameter.diag) {
     if (!diagAuthorized(e)) {
@@ -887,10 +899,10 @@ function apiAdminSaveStaff(admin, payload) {
  * 方式2: 未連携（またはシークレット未設定）なら「招待方式」
  *        （システム所有のカレンダーにイベントを作成し本人を招待→本人のカレンダーに自動表示）
  */
-function syncPersonalCalendar(email, periodKey, confirmed) {
+function syncPersonalCalendar(email, periodKey, confirmed, forceInvite) {
   var rt = getUserProp('RT_' + email);
   if (!rt || !props('OAUTH_CLIENT_SECRET')) {
-    return syncPersonalCalendarInvite(email, periodKey, confirmed);
+    return syncPersonalCalendarInvite(email, periodKey, confirmed, forceInvite);
   }
   var token = refreshAccessToken(rt, email);
   if (!token) return { skipped: 'token_refresh_failed' };
@@ -937,39 +949,156 @@ function inviteCalendar() {
   return cal;
 }
 
-/** 招待方式での本人カレンダー同期（eventIdは 'inv:' プレフィックスで保存） */
-function syncPersonalCalendarInvite(email, periodKey, confirmed) {
+/**
+ * 招待方式での本人カレンダー同期（eventIdは 'inv:' プレフィックスで保存）。
+ * 配信カレンダー上にイベントを作り、本人をゲスト招待（sendUpdates=all）して
+ * 各自のGoogleカレンダーに表示させる。
+ * forceInvite=true のときは既存イベントも再招待する（未配信分の復旧用）。
+ */
+function syncPersonalCalendarInvite(email, periodKey, confirmed, forceInvite) {
   var cal = inviteCalendar();
+  var calId = cal.getId();
   var shifts = readAll('Shifts').filter(function (r) { return r.staffEmail === email && r.periodKey === periodKey; });
   var locations = mapById(readAll('Locations'));
   var title = (confirmed ? '' : '【未確定】') + '出勤';
   var updated = 0;
+  var invited = 0;
 
   shifts.forEach(function (s) {
     try {
-      if (s.eventId && s.eventId.indexOf('inv:') === 0) {
-        var ev = cal.getEventById(s.eventId.slice(4));
-        if (ev) {
-          ev.setTitle(title);
-          updated++;
-          return;
-        }
-      }
       var locName = s.locationId && locations[s.locationId] ? locations[s.locationId].name : '';
-      var created = cal.createEvent(
-        title,
-        new Date(s.date + 'T' + pad(s.startTime) + ':00+09:00'),
-        new Date(shiftEndDateTime(s)),
-        { guests: email, sendInvites: false, description: 'FLHシフト' + (locName ? ' / ' + locName : '') }
-      );
+      var description = 'FLHシフト' + (locName ? ' / ' + locName : '');
+      var start = new Date(s.date + 'T' + pad(s.startTime) + ':00+09:00');
+      var end = new Date(shiftEndDateTime(s));
+      var ev = null;
+      if (s.eventId && s.eventId.indexOf('inv:') === 0) {
+        ev = cal.getEventById(s.eventId.slice(4));
+      }
+      if (ev) {
+        ev.setTitle(title);
+        ev.setTime(start, end);
+        ev.setDescription(description);
+        // 既存イベントは招待未送信の可能性があるので、再同期時または承認時に必ず送る
+        if (forceInvite || confirmed) {
+          if (pushInviteToGuest(calId, s.eventId.slice(4), email, title, start, end, description)) invited++;
+        }
+        updated++;
+        return;
+      }
+      var created = cal.createEvent(title, start, end, {
+        guests: email,
+        sendInvites: true,
+        description: description
+      });
       s.eventId = 'inv:' + created.getId();
       updateRowById('Shifts', s);
       updated++;
+      invited++;
     } catch (e) {
       log(email, 'calendar_invite_error', s.date + ' ' + String(e));
     }
   });
-  return { updated: updated, total: shifts.length, mode: 'invite' };
+  return { updated: updated, invited: invited, total: shifts.length, mode: 'invite' };
+}
+
+/** Calendar API で本人をゲストに追加し、招待を送信して各自のカレンダーへ載せる */
+function pushInviteToGuest(calId, icalOrApiId, email, title, start, end, description) {
+  var token = ScriptApp.getOAuthToken();
+  var apiId = findCalendarApiEventId(token, calId, icalOrApiId);
+  if (!apiId) {
+    log('system', 'calendar_invite_warn', 'event id not found: ' + String(icalOrApiId).slice(0, 40));
+    return false;
+  }
+  var res = UrlFetchApp.fetch(
+    'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId) +
+      '/events/' + encodeURIComponent(apiId) + '?sendUpdates=all',
+    {
+      method: 'patch',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + token },
+      payload: JSON.stringify({
+        summary: title,
+        description: description || '',
+        start: { dateTime: Utilities.formatDate(start, TZ, "yyyy-MM-dd'T'HH:mm:ssXXX") },
+        end: { dateTime: Utilities.formatDate(end, TZ, "yyyy-MM-dd'T'HH:mm:ssXXX") },
+        attendees: [{ email: email }]
+      }),
+      muteHttpExceptions: true
+    }
+  );
+  var code = res.getResponseCode();
+  if (code < 200 || code >= 300) {
+    log('system', 'calendar_invite_error', 'push code=' + code + ' ' + res.getContentText().slice(0, 180));
+    return false;
+  }
+  return true;
+}
+
+/** CalendarApp の iCalUID または API event id から API 用 id を解決 */
+function findCalendarApiEventId(token, calId, icalOrApiId) {
+  if (!icalOrApiId) return '';
+  var listed = UrlFetchApp.fetch(
+    'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId) +
+      '/events?iCalUID=' + encodeURIComponent(icalOrApiId) + '&maxResults=1',
+    { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true }
+  );
+  if (listed.getResponseCode() === 200) {
+    var json = JSON.parse(listed.getContentText());
+    if (json.items && json.items[0] && json.items[0].id) return json.items[0].id;
+  }
+  var direct = UrlFetchApp.fetch(
+    'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId) +
+      '/events/' + encodeURIComponent(icalOrApiId),
+    { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true }
+  );
+  if (direct.getResponseCode() === 200) {
+    var ev = JSON.parse(direct.getContentText());
+    return ev.id || '';
+  }
+  return '';
+}
+
+/**
+ * 提出済み・承認済みのシフトを本人カレンダーへ再配信する（手動実行 or ?resync_personal=1）。
+ * 直近〜次の期間を対象。GASエディタで resyncPersonalCalendars を実行してもよい。
+ */
+function resyncPersonalCalendars() {
+  var pks = targetPeriodKeysForResync();
+  var pkSet = {};
+  pks.forEach(function (k) { pkSet[k] = true; });
+  var subs = readAll('Submissions').filter(function (s) {
+    return pkSet[s.periodKey] && (s.status === 'submitted' || s.status === 'approved');
+  });
+  var results = [];
+  subs.forEach(function (s) {
+    try {
+      var r = syncPersonalCalendar(
+        s.staffEmail, s.periodKey, s.status === 'approved', true
+      );
+      results.push({ email: s.staffEmail, periodKey: s.periodKey, ok: true, updated: r.updated, invited: r.invited });
+    } catch (err) {
+      results.push({ email: s.staffEmail, periodKey: s.periodKey, ok: false, error: String(err) });
+    }
+  });
+  log('system', 'resync_personal', 'ok=' + results.filter(function (r) { return r.ok; }).length + '/' + results.length);
+  return { periods: pks, count: results.length, results: results };
+}
+
+function targetPeriodKeysForResync() {
+  var keys = recentPeriodKeys(3);
+  var now = new Date();
+  var y = now.getFullYear();
+  var m = now.getMonth() + 1;
+  var next;
+  if (now.getDate() <= 15) {
+    next = y + '-' + pad2(m) + '-B';
+  } else {
+    var nm = m === 12 ? 1 : m + 1;
+    var ny = m === 12 ? y + 1 : y;
+    next = ny + '-' + pad2(nm) + '-A';
+  }
+  if (keys.indexOf(next) < 0) keys.push(next);
+  return keys;
 }
 
 /** 共有カレンダー（管理者用・全拠点共通1つ）: add=trueで追加、falseで削除 */
