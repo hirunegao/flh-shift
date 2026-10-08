@@ -59,6 +59,17 @@ function doGet(e) {
     }
     return jsonOut({ ok: true, data: exportShiftsForDashboard() });
   }
+  // ポータル右パネル用: 指定日の承認済みシフト（閲覧専用）: ?day_shifts=1&key=秘密キー&date=yyyy-MM-dd
+  if (e && e.parameter && e.parameter.day_shifts) {
+    if (!portalShiftAuthorized(e)) {
+      return jsonOut({ ok: false, error: 'forbidden' });
+    }
+    try {
+      return jsonOut({ ok: true, data: exportDayShifts(e.parameter.date) });
+    } catch (err) {
+      return jsonOut({ ok: false, error: 'invalid_request' });
+    }
+  }
   // 診断エンドポイントは DIAG_SECRET 必須（未設定・不一致なら拒否）
   if (e && e.parameter && e.parameter.diag) {
     if (!diagAuthorized(e)) {
@@ -129,6 +140,62 @@ function shiftExportAuthorized(e) {
   if (s1 && key === s1) return true;
   var s2 = props('DIAG_SECRET');
   return !!(s2 && key === s2);
+}
+
+/** ポータル日次シフト用GETは PORTAL_SHIFT_KEY（未設定なら SHIFT_EXPORT_KEY → DIAG_SECRET にフォールバック）と ?key= の一致で許可 */
+function portalShiftAuthorized(e) {
+  var key = e && e.parameter && e.parameter.key;
+  if (!key) return false;
+  var s0 = props('PORTAL_SHIFT_KEY');
+  if (s0 && key === s0) return true;
+  return shiftExportAuthorized(e);
+}
+
+/**
+ * アプリポータル右パネル用: 指定日の承認済みシフトを拠点情報付きで返す（閲覧専用）。
+ * 返却: { date, generatedAt, locations: [{id, name}], shifts: [{staffName, locationId, startTime, endTime, overnight}] }
+ */
+function exportDayShifts(dateStr) {
+  var m = String(dateStr || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) throw new Error('invalid_request');
+  // 指定日が属する期間キー（A=1〜15日 / B=16〜末日）
+  var pk = m[1] + '-' + m[2] + '-' + (Number(m[3]) <= 15 ? 'A' : 'B');
+
+  // その期間で承認済みのスタッフを特定
+  var approvedEmails = {};
+  readAll('Submissions').forEach(function (s) {
+    if (s.periodKey === pk && s.status === 'approved') {
+      approvedEmails[String(s.staffEmail).toLowerCase()] = true;
+    }
+  });
+
+  var staffByEmail = {};
+  readAll('Staff').forEach(function (s) {
+    staffByEmail[String(s.email).toLowerCase()] = s;
+  });
+
+  var locations = readAll('Locations')
+    .filter(function (r) { return String(r.active) !== 'false'; })
+    .map(function (r) { return { id: r.id, name: r.name }; });
+
+  var shifts = readAll('Shifts').filter(function (r) {
+    return r.periodKey === pk && r.date === dateStr &&
+      approvedEmails[String(r.staffEmail).toLowerCase()];
+  }).map(function (r) {
+    var st = staffByEmail[String(r.staffEmail).toLowerCase()] || {};
+    return {
+      staffName: st.name || String(r.staffEmail),
+      locationId: r.locationId || '',
+      startTime: pad(r.startTime),
+      endTime: pad(r.endTime),
+      overnight: pad(r.endTime) <= pad(r.startTime) // 終了<=開始は翌日跨ぎ
+    };
+  }).sort(function (a, b) {
+    if (a.startTime !== b.startTime) return a.startTime < b.startTime ? -1 : 1;
+    return a.staffName < b.staffName ? -1 : a.staffName > b.staffName ? 1 : 0;
+  });
+
+  return { date: dateStr, generatedAt: nowStr(), locations: locations, shifts: shifts };
 }
 
 /**
