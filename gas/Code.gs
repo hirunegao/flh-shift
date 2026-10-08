@@ -66,7 +66,7 @@ function doGet(e) {
       return jsonOut({ ok: false, error: 'forbidden' });
     }
     try {
-      return jsonOut({ ok: true, data: exportDayShifts(e.parameter.date) });
+      return jsonOut({ ok: true, data: exportDayShifts(e.parameter.date, { skipStaff: e.parameter.nostaff === '1' }) });
     } catch (err) {
       return jsonOut({ ok: false, error: 'invalid_request' });
     }
@@ -169,58 +169,96 @@ function portalShiftAuthorized(e) {
  * 承認済み(approved)＋承認待ち(submitted)を対象とし、status フィールドで区別する。
  * 返却: { date, generatedAt, locations: [{id, name}], shifts: [{staffName, locationId, startTime, endTime, overnight, status}] }
  */
-function exportDayShifts(dateStr) {
+function exportDayShifts(dateStr, opts) {
   var m = String(dateStr || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) throw new Error('invalid_request');
-  // 指定日が属する期間キー（A=1〜15日 / B=16〜末日）
+  opts = opts || {};
   var pk = m[1] + '-' + m[2] + '-' + (Number(m[3]) <= 15 ? 'A' : 'B');
 
-  // その期間の提出ステータス（approved / submitted のみ対象。draft・rejected は除外）
+  var cache = CacheService.getScriptCache();
+  var dayKey = 'portal_day_v4_' + dateStr;
+  var cached = null;
+  if (!opts.noCache) {
+    try {
+      var hit = cache.get(dayKey);
+      if (hit) cached = JSON.parse(hit);
+    } catch (e) { cached = null; }
+  }
+
+  var out;
+  if (cached && Array.isArray(cached.shifts)) {
+    out = cached;
+  } else {
+    var period = getPeriodShiftsCached(pk);
+    var shifts = (period.shifts || []).filter(function (r) { return r.date === dateStr; });
+    out = {
+      date: dateStr,
+      generatedAt: nowStr(),
+      shifts: shifts,
+      appointments: listAppointmentsForDate(dateStr)
+    };
+    try { cache.put(dayKey, JSON.stringify(out), 120); } catch (e) { /* キャッシュ不要 */ }
+  }
+
+  out.staff = opts.skipStaff ? [] : getCachedStaffList();
+  return out;
+}
+
+/** 期間（半月）のシフトを2分キャッシュ。同じ期間の日付移動を速くする */
+function getPeriodShiftsCached(pk) {
+  var cache = CacheService.getScriptCache();
+  var key = 'portal_pk_v1_' + pk;
+  try {
+    var hit = cache.get(key);
+    if (hit) return JSON.parse(hit);
+  } catch (e) { /* 壊れたキャッシュは無視 */ }
+
+  var staffByEmail = {};
+  readAll('Staff').forEach(function (s) {
+    staffByEmail[String(s.email).toLowerCase()] = s;
+  });
   var statusByEmail = {};
   readAll('Submissions').forEach(function (s) {
     if (s.periodKey === pk && (s.status === 'approved' || s.status === 'submitted')) {
       statusByEmail[String(s.staffEmail).toLowerCase()] = s.status;
     }
   });
-
-  var staffByEmail = {};
-  readAll('Staff').forEach(function (s) {
-    staffByEmail[String(s.email).toLowerCase()] = s;
-  });
-
-  var locations = readAll('Locations')
-    .filter(function (r) { return String(r.active) !== 'false'; })
-    .map(function (r) { return { id: r.id, name: r.name }; });
-
   var shifts = readAll('Shifts').filter(function (r) {
-    return r.periodKey === pk && r.date === dateStr &&
-      statusByEmail[String(r.staffEmail).toLowerCase()];
+    return r.periodKey === pk && statusByEmail[String(r.staffEmail).toLowerCase()];
   }).map(function (r) {
     var st = staffByEmail[String(r.staffEmail).toLowerCase()] || {};
     return {
+      date: r.date,
       staffName: st.name || String(r.staffEmail),
-      locationId: r.locationId || '',
       startTime: pad(r.startTime),
       endTime: pad(r.endTime),
-      overnight: pad(r.endTime) <= pad(r.startTime), // 終了<=開始は翌日跨ぎ
-      status: statusByEmail[String(r.staffEmail).toLowerCase()] // approved | submitted
+      overnight: pad(r.endTime) <= pad(r.startTime),
+      status: statusByEmail[String(r.staffEmail).toLowerCase()]
     };
   }).sort(function (a, b) {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
     if (a.startTime !== b.startTime) return a.startTime < b.startTime ? -1 : 1;
     return a.staffName < b.staffName ? -1 : a.staffName > b.staffName ? 1 : 0;
   });
+  var bundle = { shifts: shifts };
+  try { cache.put(key, JSON.stringify(bundle), 120); } catch (e) { /* サイズ超過時は無視 */ }
+  return bundle;
+}
 
+function getCachedStaffList() {
+  var cache = CacheService.getScriptCache();
+  try {
+    var hit = cache.get('portal_staff_v1');
+    if (hit) return JSON.parse(hit);
+  } catch (e) { /* ignore */ }
   var staff = readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; })
     .map(function (s) { return { name: s.name, email: String(s.email || '').toLowerCase() }; });
+  try { cache.put('portal_staff_v1', JSON.stringify(staff), 600); } catch (e) { /* ignore */ }
+  return staff;
+}
 
-  return {
-    date: dateStr,
-    generatedAt: nowStr(),
-    locations: locations,
-    staff: staff,
-    shifts: shifts,
-    appointments: listAppointmentsForDate(dateStr)
-  };
+function invalidatePortalDayCache(dateStr) {
+  try { CacheService.getScriptCache().remove('portal_day_v4_' + dateStr); } catch (e) { /* ignore */ }
 }
 
 function listAppointmentsForDate(dateStr) {
@@ -326,6 +364,7 @@ function upsertAppointment(p, isUpdate) {
     row.eventId = existing.eventId || '';
     row.createdBy = existing.createdBy || row.createdBy;
     row._rowIndex = existing._rowIndex;
+    if (existing.date && existing.date !== row.date) invalidatePortalDayCache(existing.date);
   }
   try {
     syncAppointmentToCalendar(row);
@@ -334,6 +373,7 @@ function upsertAppointment(p, isUpdate) {
   }
   if (isUpdate) updateRowById('Appointments', row);
   else appendRows('Appointments', [row]);
+  invalidatePortalDayCache(row.date);
   log(row.createdBy || 'portal', isUpdate ? 'appointment_update' : 'appointment_create', row.title + ' ' + row.date);
   return serializeAppointment(row);
 }
@@ -345,6 +385,7 @@ function removeAppointment(p) {
   if (!existing) throw new Error('not_found');
   deleteAppointmentEvent(existing);
   deleteRowsWhere('Appointments', function (r) { return r.id === id; });
+  invalidatePortalDayCache(existing.date);
   log(String(p.createdBy || 'portal'), 'appointment_delete', id);
   return { deleted: true };
 }
