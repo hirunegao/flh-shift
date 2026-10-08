@@ -152,8 +152,9 @@ function portalShiftAuthorized(e) {
 }
 
 /**
- * アプリポータル右パネル用: 指定日の承認済みシフトを拠点情報付きで返す（閲覧専用）。
- * 返却: { date, generatedAt, locations: [{id, name}], shifts: [{staffName, locationId, startTime, endTime, overnight}] }
+ * アプリポータル右パネル用: 指定日のシフトを拠点情報付きで返す（閲覧専用）。
+ * 承認済み(approved)＋承認待ち(submitted)を対象とし、status フィールドで区別する。
+ * 返却: { date, generatedAt, locations: [{id, name}], shifts: [{staffName, locationId, startTime, endTime, overnight, status}] }
  */
 function exportDayShifts(dateStr) {
   var m = String(dateStr || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -161,11 +162,11 @@ function exportDayShifts(dateStr) {
   // 指定日が属する期間キー（A=1〜15日 / B=16〜末日）
   var pk = m[1] + '-' + m[2] + '-' + (Number(m[3]) <= 15 ? 'A' : 'B');
 
-  // その期間で承認済みのスタッフを特定
-  var approvedEmails = {};
+  // その期間の提出ステータス（approved / submitted のみ対象。draft・rejected は除外）
+  var statusByEmail = {};
   readAll('Submissions').forEach(function (s) {
-    if (s.periodKey === pk && s.status === 'approved') {
-      approvedEmails[String(s.staffEmail).toLowerCase()] = true;
+    if (s.periodKey === pk && (s.status === 'approved' || s.status === 'submitted')) {
+      statusByEmail[String(s.staffEmail).toLowerCase()] = s.status;
     }
   });
 
@@ -180,7 +181,7 @@ function exportDayShifts(dateStr) {
 
   var shifts = readAll('Shifts').filter(function (r) {
     return r.periodKey === pk && r.date === dateStr &&
-      approvedEmails[String(r.staffEmail).toLowerCase()];
+      statusByEmail[String(r.staffEmail).toLowerCase()];
   }).map(function (r) {
     var st = staffByEmail[String(r.staffEmail).toLowerCase()] || {};
     return {
@@ -188,7 +189,8 @@ function exportDayShifts(dateStr) {
       locationId: r.locationId || '',
       startTime: pad(r.startTime),
       endTime: pad(r.endTime),
-      overnight: pad(r.endTime) <= pad(r.startTime) // 終了<=開始は翌日跨ぎ
+      overnight: pad(r.endTime) <= pad(r.startTime), // 終了<=開始は翌日跨ぎ
+      status: statusByEmail[String(r.staffEmail).toLowerCase()] // approved | submitted
     };
   }).sort(function (a, b) {
     if (a.startTime !== b.startTime) return a.startTime < b.startTime ? -1 : 1;
