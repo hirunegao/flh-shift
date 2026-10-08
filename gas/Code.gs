@@ -32,7 +32,8 @@ var SHEETS = {
   ChangeRequests: ['id', 'staffEmail', 'periodKey', 'reason', 'status', 'createdAt', 'resolvedAt', 'resolvedBy'],
   Templates: ['id', 'staffEmail', 'name', 'dataJson', 'updatedAt'],
   Settings: ['key', 'value'],
-  AuditLog: ['timestamp', 'actor', 'action', 'detail']
+  AuditLog: ['timestamp', 'actor', 'action', 'detail'],
+  Appointments: ['id', 'title', 'kind', 'date', 'startTime', 'endTime', 'location', 'meetingUrl', 'attendeeEmails', 'attendeeNames', 'createdBy', 'eventId', 'notes', 'updatedAt']
 };
 
 var DEFAULT_SETTINGS = {
@@ -209,7 +210,184 @@ function exportDayShifts(dateStr) {
     return a.staffName < b.staffName ? -1 : a.staffName > b.staffName ? 1 : 0;
   });
 
-  return { date: dateStr, generatedAt: nowStr(), locations: locations, shifts: shifts };
+  var staff = readAll('Staff').filter(function (s) { return String(s.active) !== 'false'; })
+    .map(function (s) { return { name: s.name, email: String(s.email || '').toLowerCase() }; });
+
+  return {
+    date: dateStr,
+    generatedAt: nowStr(),
+    locations: locations,
+    staff: staff,
+    shifts: shifts,
+    appointments: listAppointmentsForDate(dateStr)
+  };
+}
+
+function listAppointmentsForDate(dateStr) {
+  try {
+    return readAll('Appointments').filter(function (r) { return r.date === dateStr; })
+      .map(serializeAppointment)
+      .sort(function (a, b) {
+        if (a.startTime !== b.startTime) return a.startTime < b.startTime ? -1 : 1;
+        return a.title < b.title ? -1 : 1;
+      });
+  } catch (e) {
+    return [];
+  }
+}
+
+function serializeAppointment(r) {
+  return {
+    id: r.id,
+    title: r.title,
+    kind: r.kind || 'その他',
+    date: r.date,
+    startTime: pad(r.startTime),
+    endTime: pad(r.endTime),
+    overnight: pad(r.endTime) <= pad(r.startTime),
+    location: r.location || '',
+    meetingUrl: r.meetingUrl || '',
+    attendeeEmails: splitCsv(r.attendeeEmails),
+    attendeeNames: splitCsv(r.attendeeNames),
+    createdBy: r.createdBy || '',
+    notes: r.notes || ''
+  };
+}
+
+function portalShiftHandlePost(req) {
+  if (!portalShiftAuthorized({ parameter: { key: req.key } })) {
+    return jsonOut({ ok: false, error: 'forbidden' });
+  }
+  try {
+    var payload = req.payload || {};
+    var data;
+    if (req.action === 'createAppointment') data = upsertAppointment(payload, false);
+    else if (req.action === 'updateAppointment') data = upsertAppointment(payload, true);
+    else if (req.action === 'deleteAppointment') data = removeAppointment(payload);
+    else throw new Error('invalid_request');
+    return jsonOut({ ok: true, data: data });
+  } catch (err) {
+    var msg = String(err && err.message ? err.message : err);
+    var known = ['forbidden', 'not_found', 'invalid_request'];
+    var code = known.indexOf(msg) >= 0 ? msg : 'server_error';
+    if (code === 'server_error') log('system', 'portal_shift_error', msg + ' action=' + req.action);
+    return jsonOut({ ok: false, error: code });
+  }
+}
+
+function upsertAppointment(p, isUpdate) {
+  var dateStr = String(p.date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) throw new Error('invalid_request');
+  var timeRe = /^\d{1,2}:\d{2}$/;
+  if (!timeRe.test(String(p.startTime)) || !timeRe.test(String(p.endTime))) throw new Error('invalid_request');
+  var kind = String(p.kind || 'その他');
+  if (['営業商談', '会議', 'その他'].indexOf(kind) < 0) kind = 'その他';
+  var title = String(p.title || '').trim() || kind;
+  if (title.length > 80) title = title.slice(0, 80);
+
+  var emails = [];
+  var seen = {};
+  function addEmail(em) {
+    em = String(em || '').toLowerCase().trim();
+    if (!em || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) return;
+    if (seen[em]) return;
+    seen[em] = true;
+    emails.push(em);
+  }
+  var raw = Array.isArray(p.attendeeEmails) ? p.attendeeEmails : String(p.attendeeEmails || '').split(',');
+  raw.forEach(addEmail);
+  String(p.extraEmails || '').split(/[,;\s]+/).forEach(addEmail);
+  if (emails.length === 0 || emails.length > 30) throw new Error('invalid_request');
+
+  var staffByEmail = {};
+  readAll('Staff').forEach(function (s) { staffByEmail[String(s.email).toLowerCase()] = s.name; });
+  var names = emails.map(function (em) { return staffByEmail[em] || em; });
+
+  var row = {
+    id: isUpdate ? String(p.id || '') : uid(),
+    title: title,
+    kind: kind,
+    date: dateStr,
+    startTime: pad(p.startTime),
+    endTime: pad(p.endTime),
+    location: String(p.location || '').slice(0, 200),
+    meetingUrl: String(p.meetingUrl || '').slice(0, 500),
+    attendeeEmails: emails.join(','),
+    attendeeNames: names.join(','),
+    createdBy: String(p.createdBy || '').slice(0, 40),
+    eventId: '',
+    notes: String(p.notes || '').slice(0, 500),
+    updatedAt: nowStr()
+  };
+  if (isUpdate) {
+    if (!row.id) throw new Error('invalid_request');
+    var existing = readAll('Appointments').filter(function (r) { return r.id === row.id; })[0];
+    if (!existing) throw new Error('not_found');
+    row.eventId = existing.eventId || '';
+    row.createdBy = existing.createdBy || row.createdBy;
+    row._rowIndex = existing._rowIndex;
+  }
+  try {
+    syncAppointmentToCalendar(row);
+  } catch (e) {
+    log('system', 'appointment_cal_error', String(e));
+  }
+  if (isUpdate) updateRowById('Appointments', row);
+  else appendRows('Appointments', [row]);
+  log(row.createdBy || 'portal', isUpdate ? 'appointment_update' : 'appointment_create', row.title + ' ' + row.date);
+  return serializeAppointment(row);
+}
+
+function removeAppointment(p) {
+  var id = String(p.id || '');
+  if (!id) throw new Error('invalid_request');
+  var existing = readAll('Appointments').filter(function (r) { return r.id === id; })[0];
+  if (!existing) throw new Error('not_found');
+  deleteAppointmentEvent(existing);
+  deleteRowsWhere('Appointments', function (r) { return r.id === id; });
+  log(String(p.createdBy || 'portal'), 'appointment_delete', id);
+  return { deleted: true };
+}
+
+function appointmentCalendar() {
+  var id = props('APPOINTMENT_CALENDAR_ID');
+  var cal = id ? CalendarApp.getCalendarById(id) : null;
+  if (!cal) {
+    cal = CalendarApp.createCalendar('FLH予定', { timeZone: TZ });
+    PropertiesService.getScriptProperties().setProperty('APPOINTMENT_CALENDAR_ID', cal.getId());
+  }
+  return cal;
+}
+
+function syncAppointmentToCalendar(row) {
+  var cal = appointmentCalendar();
+  deleteAppointmentEvent(row);
+  var emails = splitCsv(row.attendeeEmails);
+  var desc = [];
+  if (row.meetingUrl) desc.push('URL: ' + row.meetingUrl);
+  if (row.notes) desc.push(row.notes);
+  if (row.attendeeNames) desc.push('参加者: ' + row.attendeeNames);
+  var ev = cal.createEvent(
+    row.title,
+    new Date(row.date + 'T' + pad(row.startTime) + ':00+09:00'),
+    new Date(shiftEndDateTime({ date: row.date, startTime: row.startTime, endTime: row.endTime })),
+    {
+      guests: emails.join(','),
+      sendInvites: true,
+      location: row.location || '',
+      description: desc.join('\n')
+    }
+  );
+  row.eventId = ev.getId();
+  return row;
+}
+
+function deleteAppointmentEvent(row) {
+  if (!row || !row.eventId) return;
+  try {
+    var ev = appointmentCalendar().getEventById(row.eventId);
+    if (ev) ev.deleteEvent();
+  } catch (e) { /* 削除済み等は無視 */ }
 }
 
 /**
@@ -272,6 +450,9 @@ function doPost(e) {
   }
   if (req && req.service === 'transport') {
     return transportHandlePost(req, e);
+  }
+  if (req && req.service === 'portal_shift') {
+    return portalShiftHandlePost(req);
   }
   try {
     var result = route(req);
