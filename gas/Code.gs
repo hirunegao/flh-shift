@@ -492,6 +492,9 @@ function doPost(e) {
   if (req && req.service === 'transport') {
     return transportHandlePost(req, e);
   }
+  if (req && req.service === 'project') {
+    return projectHandlePost(req, e);
+  }
   if (req && req.service === 'portal_shift') {
     return portalShiftHandlePost(req);
   }
