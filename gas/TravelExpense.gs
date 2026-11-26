@@ -30,7 +30,7 @@ var TRAVEL_NOTION_VERSION = '2022-06-28';
 var TRAVEL_FUEL_YEN_PER_KM = 20;
 var TRAVEL_ROLES = { '役員': 1, '管理職': 1, '一般': 1 };
 var TRAVEL_DEFAULT_ROLES = { kajiwara: '役員' };
-// 種別（画面で選ぶ）。日当が付くのは出張だけで、承認されて初めて支給対象になる
+// 種別（画面で選ぶ）。日当が付くのは宿泊出張だけで、承認されて初めて支給対象になる
 var TRAVEL_KINDS = { '交通費': 1, '日帰り出張': 1, '宿泊出張': 1, '海外出張': 1 };
 var TRAVEL_MODES = { '電車': 1, 'バス': 1, 'タクシー': 1, '新幹線': 1, '飛行機': 1, '車': 1, 'その他': 1 };
 // 領収書の撮影が必須の移動手段（宿泊がある場合も必須）
@@ -394,7 +394,8 @@ function travelPickRate_(rates, role, tripType, onDate) {
 
 /** 種別 → 規定マスタの区分 */
 function travelTripType_(kind, distanceKm) {
-  if (kind === '日帰り出張') return distanceKm >= TRAVEL_FAR_KM ? '日帰り遠' : '日帰り近';
+  // 日帰り出張に日当は付けない（2026-11 決定）。規定マスタは引かず、実費だけの精算になる
+  if (kind === '日帰り出張') return null;
   if (kind === '宿泊出張') return '宿泊';
   if (kind === '海外出張') return '海外第1';
   return null;
