@@ -463,7 +463,7 @@ function travelNum_(v, label) {
 
 /**
  * 申請の保存（新規／本人の下書・差戻し分の修正）。
- * 金額のうち日当・燃料費・宿泊の支給額はここで計算し直す。画面の計算結果は信用しない。
+ * 金額のうち日当・宿泊の支給額はここで計算し直す。画面の計算結果は信用しない。
  */
 function travelSaveTrip_(token, entry, me) {
   var status = String(entry.status || '下書').trim();
@@ -502,8 +502,8 @@ function travelSaveTrip_(token, entry, me) {
   var transport = travelNum_(entry.transport_cost, '交通費');
   var other = travelNum_(entry.other_cost, 'その他経費');
   var lodgingActual = nights > 0 ? travelNum_(entry.lodging_cost, '宿泊料') : 0;
-  var fuel = mode === '車' ? Math.round(distance * 2 * TRAVEL_FUEL_YEN_PER_KM) : 0;
-  if (status === '提出' && mode === '車' && distance <= 0) throw new Error('車の場合は片道の距離(km)を入れてください');
+  // 車の距離×単価による燃料費の支給はしない（2026-11 決定）。車でかかった費用は実費で入力する
+  var fuel = 0;
 
   // 日当・宿泊上限（出張のみ。交通費は実費だけ）
   var role = me.role;
@@ -886,7 +886,6 @@ function travelBootstrap_(token, me) {
     staff_options: email ? [] : travelStaffList_(),
     people: people,
     policy: {
-      fuel_yen_per_km: TRAVEL_FUEL_YEN_PER_KM,
       far_km: TRAVEL_FAR_KM,
       receipt_modes: Object.keys(TRAVEL_RECEIPT_MODES),
       max_receipts: TRAVEL_MAX_RECEIPTS,
