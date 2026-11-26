@@ -31,7 +31,8 @@ var TRAVEL_FUEL_YEN_PER_KM = 20;
 var TRAVEL_ROLES = { '役員': 1, '管理職': 1, '一般': 1 };
 var TRAVEL_DEFAULT_ROLES = { kajiwara: '役員' };
 // 種別（画面で選ぶ）。日当が付くのは宿泊出張だけで、承認されて初めて支給対象になる
-var TRAVEL_KINDS = { '交通費': 1, '日帰り出張': 1, '宿泊出張': 1, '海外出張': 1 };
+// 「日帰り出張」は当社には無いので種別に持たない（2026-11 決定）。日帰りの移動はすべて「交通費」
+var TRAVEL_KINDS = { '交通費': 1, '宿泊出張': 1, '海外出張': 1 };
 var TRAVEL_MODES = { '電車': 1, 'バス': 1, 'タクシー': 1, '新幹線': 1, '飛行機': 1, '車': 1, 'その他': 1 };
 // 領収書の撮影が必須の移動手段（宿泊がある場合も必須）
 var TRAVEL_RECEIPT_MODES = { 'タクシー': 1, '新幹線': 1, '飛行機': 1 };
@@ -394,8 +395,6 @@ function travelPickRate_(rates, role, tripType, onDate) {
 
 /** 種別 → 規定マスタの区分 */
 function travelTripType_(kind, distanceKm) {
-  // 日帰り出張に日当は付けない（2026-11 決定）。規定マスタは引かず、実費だけの精算になる
-  if (kind === '日帰り出張') return null;
   if (kind === '宿泊出張') return '宿泊';
   if (kind === '海外出張') return '海外第1';
   return null;
@@ -412,7 +411,8 @@ function travelToTrip_(page) {
   var other = travelNumber_(p['その他経費']) || 0;
   var tripType = travelSelect_(p['区分']);
   var kind = travelSelect_(p['種別']);
-  if (!kind) kind = tripType === '宿泊' ? '宿泊出張' : (tripType && tripType.indexOf('海外') === 0 ? '海外出張' : '日帰り出張');
+  if (!kind) kind = tripType === '宿泊' ? '宿泊出張' : (tripType && tripType.indexOf('海外') === 0 ? '海外出張' : '交通費');
+  if (kind === '日帰り出張') kind = '交通費'; // 廃止した種別で残っている行
   var status = travelSelect_(p['ステータス']) || '下書';
   if (status === '承認') status = '経理承認済'; // 旧1段階承認の行
   return {
