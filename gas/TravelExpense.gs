@@ -13,7 +13,7 @@
  * Script Properties:
  *   NOTION_TOKEN           … Notion Integration Secret
  *   GH_PAT                 … fine-grained PAT (flh-travel-expense-sync Contents:write)
- *   TRAVEL_USERS           … 利用者名簿 JSON（app-portal/users.js と同じ形）
+ *   TRAVEL_USERS           … 利用者名簿 JSON（app-portal/users.js と同じ形）。未設定なら PROJECT_USERS を使う
  *                            [{ "username": "kajiwara", "display": "梶原",
  *                               "salt": "...", "password_hash": "...", "is_admin": true }, ...]
  *   TRAVEL_SESSION_SECRET  … セッション署名鍵。未設定なら初回に自動生成する
@@ -65,8 +65,10 @@ var TRAVEL_SESSION_HOURS = 12;
 var TRAVEL_MAX_LOGIN_FAILS = 10;
 
 function travelRoster_() {
-  var raw = PropertiesService.getScriptProperties().getProperty('TRAVEL_USERS');
-  if (!raw) throw new Error('TRAVEL_USERS が未設定です');
+  // 専用名簿 TRAVEL_USERS が無ければ、プロジェクト経費と同じ名簿（PROJECT_USERS）を使う
+  var sp = PropertiesService.getScriptProperties();
+  var raw = sp.getProperty('TRAVEL_USERS') || sp.getProperty('PROJECT_USERS');
+  if (!raw) throw new Error('利用者名簿（TRAVEL_USERS / PROJECT_USERS）が未設定です');
   var list;
   try {
     list = JSON.parse(raw);
