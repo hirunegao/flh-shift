@@ -2,7 +2,7 @@
  * FLH 出張精算 API（flh-shift Web App に相乗り）
  *
  * ポータルから { service: 'travel', token, action, ... }
- *   認証: salt / login / session
+ *   認証: google（Google ログイン）/ salt / login（パスワード）/ session
  *   読み: bootstrap（本人分だけ返す。管理者は全員分）/ receipts
  *   書き: save / status / bulkStatus / remove / dismiss / linkStaff
  *
@@ -17,6 +17,8 @@
  *                            [{ "username": "kajiwara", "display": "梶原",
  *                               "salt": "...", "password_hash": "...", "is_admin": true }, ...]
  *   TRAVEL_SESSION_SECRET  … セッション署名鍵。未設定なら初回に自動生成する
+ *   TRAVEL_EMAIL_MAP       … Google ログイン用。Google のメール → 名簿のユーザー名 JSON 例 {"a@gmail.com":"kajiwara"}
+ *                            ここに無いメールでも、シフト名簿（Staff シート）で有効な人は Google でログインできる
  *   TRAVEL_ROLE_MAP        … 任意。役職の上書き JSON 例 {"kajiwara":"役員","hayashi":"管理職"}
  *                            未設定の人は「一般」（kajiwara のみ既定で「役員」）
  *
@@ -63,6 +65,7 @@ function travelSetupProperties(notionToken, ghPat, usersJson) {
 // ==================== 認証 ====================
 
 var TRAVEL_SESSION_HOURS = 12;
+var TRAVEL_GOOGLE_SESSION_HOURS = 24 * 7; // Google ログインは7日間保持（CS一元化ツールと同じ）
 var TRAVEL_MAX_LOGIN_FAILS = 10;
 
 function travelRoster_() {
@@ -136,11 +139,71 @@ function travelSaltFor_(username) {
   return travelSign_('salt|' + String(username || '')).slice(0, 16);
 }
 
-function travelIssueToken_(username) {
-  var payload = Utilities.base64EncodeWebSafe(
-    Utilities.newBlob(JSON.stringify({ u: username, exp: Date.now() + TRAVEL_SESSION_HOURS * 3600 * 1000 })).getBytes()
-  );
+function travelIssueToken_(username, hours, viaGoogle) {
+  var data = { u: username, exp: Date.now() + (hours || TRAVEL_SESSION_HOURS) * 3600 * 1000 };
+  if (viaGoogle) data.g = 1;
+  var payload = Utilities.base64EncodeWebSafe(Utilities.newBlob(JSON.stringify(data)).getBytes());
   return payload + '.' + travelSign_(payload);
+}
+
+/** シフト名簿（Staff シート）で有効な人をメールで探す */
+function travelStaffByEmail_(email) {
+  email = String(email || '').toLowerCase();
+  if (!email) return null;
+  var list = travelStaffList_();
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].email === email) return list[i];
+  }
+  return null;
+}
+
+/** Google のメールに対応する名簿のユーザー名（無ければ null）。同じ人がパスワードでも Google でも同じ申請者になるようにする */
+function travelUsernameForEmail_(email) {
+  var sp = PropertiesService.getScriptProperties();
+  var map = {};
+  try {
+    map = JSON.parse(sp.getProperty('TRAVEL_EMAIL_MAP') || '{}') || {};
+  } catch (e) {
+    map = {};
+  }
+  var roster = travelRoster_();
+  var i;
+  for (var key in map) {
+    if (String(key).toLowerCase() !== email) continue;
+    for (i = 0; i < roster.length; i++) {
+      if (roster[i].username === map[key]) return roster[i].username;
+    }
+  }
+  // 本人がカレンダー連動で選んだメール
+  for (i = 0; i < roster.length; i++) {
+    var linked = String(sp.getProperty(travelUserProp_('TRAVEL_EMAIL_', roster[i].username)) || '').toLowerCase();
+    if (linked && linked === email) return roster[i].username;
+  }
+  return null;
+}
+
+/**
+ * Google ログイン。ID トークンは Google に問い合わせて検証する（flh-shift 本体の verifyIdToken）。
+ * 入れるのは「名簿にメールがひも付いている人」か「シフト名簿で有効な人」だけ。
+ */
+function travelGoogleLogin_(body) {
+  var g = verifyIdToken(String(body.id_token || ''));
+  var staff = travelStaffByEmail_(g.email);
+  var uname = travelUsernameForEmail_(g.email);
+  if (!uname && !staff) throw new Error('not_registered');
+  var user;
+  if (uname) {
+    var u = travelFindUser_(uname);
+    user = { username: u.username, display: u.display, is_admin: u.is_admin };
+  } else {
+    // 名簿に無いスタッフ（新しく入った人など）はメールをそのまま利用者IDにする。承認権限は付かない
+    user = { username: g.email, display: staff.name || g.name, is_admin: false };
+  }
+  // カレンダー連動（予定を精算待ちに並べる）も同じメールで自動設定する
+  if (staff) {
+    PropertiesService.getScriptProperties().setProperty(travelUserProp_('TRAVEL_EMAIL_', user.username), g.email);
+  }
+  return { token: travelIssueToken_(user.username, TRAVEL_GOOGLE_SESSION_HOURS, true), user: user };
 }
 
 /**
@@ -160,8 +223,13 @@ function travelResolveUser_(token) {
   }
   if (!payload.exp || Number(payload.exp) < Date.now()) throw new Error('token_expired');
   var u = travelFindUser_(payload.u);
-  if (!u) throw new Error('not_registered');
-  return { username: u.username, display: u.display, is_admin: u.is_admin };
+  if (u) return { username: u.username, display: u.display, is_admin: u.is_admin };
+  if (payload.g) {
+    // Google でログインした、名簿に無いスタッフ。シフト名簿から外れたら使えなくなる
+    var staff = travelStaffByEmail_(payload.u);
+    if (staff) return { username: staff.email, display: staff.name || staff.email, is_admin: false };
+  }
+  throw new Error('not_registered');
 }
 
 /**
@@ -199,12 +267,18 @@ function travelHandlePost(body, e) {
       return travelJson_({
         ok: true,
         service: 'flh-travel-expense',
-        version: 2,
+        version: 3,
+        google_client_id: oauthClientId(),
         hasNotion: !!props.getProperty('NOTION_TOKEN')
       });
     }
     if (action === 'salt') {
       return travelJson_({ ok: true, salt: travelSaltFor_(body.username) });
+    }
+    if (action === 'google') {
+      var gs = travelGoogleLogin_(body);
+      gs.user.role = travelRoleOf_(gs.user.username);
+      return travelJson_({ ok: true, token: gs.token, user: gs.user });
     }
     if (action === 'login') {
       var session = travelLogin_(body);
